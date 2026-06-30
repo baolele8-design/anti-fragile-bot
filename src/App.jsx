@@ -5,9 +5,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 // ==========================================
 // 1. SUPABASE INITIALIZATION (CẤU HÌNH NETLIFY)
 // ==========================================
-// ⚠️ KHI CHẠY TRÊN NETLIFY: Hãy cấu hình các biến này trong Environment Variables
-const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL || 'YOUR_SUPABASE_URL'; 
-const supabaseKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_KEY'; 
+// KHI CHẠY TRÊN NETLIFY HOẶC LOCAL VITE:
+// Nếu bạn thiết lập biến môi trường ở file .env (ví dụ: VITE_SUPABASE_URL), Vite tự động nạp.
+// Ở đây tôi dùng biến trực tiếp để đảm bảo web xem trước không bị lỗi. 
+// ĐỂ DÙNG THẬT: thay 'YOUR_SUPABASE_URL' bằng URL thực tế của bạn hoặc dùng import.meta.env.VITE_SUPABASE_URL
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL; 
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY; 
 
 const supabase = (supabaseUrl !== 'YOUR_SUPABASE_URL' && supabaseUrl) 
   ? createClient(supabaseUrl, supabaseKey) 
@@ -225,7 +228,8 @@ export default function AntiFragileTerminal() {
 
     setIsSyncingCq(true);
     try {
-      const cqApiKey = import.meta.env?.VITE_CQ_API_KEY || "YOUR_CRYPTOQUANT_API_KEY"; 
+      // Netlify: Hãy thay "YOUR_CRYPTOQUANT_API_KEY" bằng api thật (hoặc lấy từ môi trường)
+      const cqApiKey = "zAdtqmnl6tdh70g1YiNUq5brGjQgFCIBVNJOJNWp5yDnAh73syuWAQODaFQzAlr"; 
       
       if (!cqApiKey || cqApiKey === "YOUR_CRYPTOQUANT_API_KEY") {
         showToast("⚠️ Chưa cấu hình CryptoQuant Key. Sẽ dùng dữ liệu mô phỏng.");
@@ -237,7 +241,7 @@ export default function AntiFragileTerminal() {
             isAutoSynced: true
           }));
           setIsSyncingCq(false);
-          setCqCooldown(30); // Mô phỏng: Đợi 30s mới được bấm lại
+          setCqCooldown(30); 
           showToast("🔗 Đã đồng bộ On-chain Data (Dữ liệu mô phỏng)");
         }, 1500);
         return;
@@ -246,13 +250,13 @@ export default function AntiFragileTerminal() {
       const coinFormat = symbol.substring(0, 3).toLowerCase();
       const headers = { 'Authorization': `Bearer ${cqApiKey}` };
 
-      // 1. Gọi MVRV Z-Score
+      // Gọi MVRV Z-Score
       const mvrvRes = await fetch(`https://api.cryptoquant.com/v1/${coinFormat}/market-indicator/mvrv?limit=1`, { headers });
       if (mvrvRes.status === 429) throw new Error('RATE_LIMIT');
       if (!mvrvRes.ok) throw new Error('API_ERROR');
       const mvrvData = await mvrvRes.json();
       
-      // 2. Gọi Dữ liệu thanh lý
+      // Gọi Dữ liệu thanh lý
       const liqRes = await fetch(`https://api.cryptoquant.com/v1/${coinFormat}/market-data/liquidations?limit=1`, { headers });
       if (liqRes.status === 429) throw new Error('RATE_LIMIT');
       if (!liqRes.ok) throw new Error('API_ERROR');
@@ -280,14 +284,14 @@ export default function AntiFragileTerminal() {
         isAutoSynced: true
       }));
 
-      setCqCooldown(300); // Đợi 5 phút sau mỗi lần đồng bộ thành công (Bảo vệ 50 req/day)
+      setCqCooldown(300); // 5 phút cooldown tránh bị block
       showToast("🔗 Đã đồng bộ On-chain chuẩn từ CryptoQuant!");
 
     } catch (e) {
       console.error(e);
       if (e.message === 'RATE_LIMIT') {
         showToast("❌ Lỗi 429: Vượt quá giới hạn gói Free CryptoQuant (Max 50 req/ngày). Khóa 1 giờ.");
-        setCqCooldown(3600); // Block 1 tiếng để tránh spam
+        setCqCooldown(3600); 
       } else {
         showToast("❌ Lỗi API CryptoQuant. Vui lòng kiểm tra lại Key.");
       }
@@ -562,7 +566,7 @@ export default function AntiFragileTerminal() {
   };
 
   // ==========================================
-  // 2. GEMINI AI QUANT ANALYST CẤP CAO (QUẢN TRỊ RATE LIMIT)
+  // 3. GEMINI AI QUANT ANALYST CẤP CAO (QUẢN TRỊ RATE LIMIT)
   // ==========================================
   const runGeminiAnalysis = async () => {
     if (geminiCooldown > 0) {
@@ -575,10 +579,9 @@ export default function AntiFragileTerminal() {
     setAiAnalysis('');
     
     try {
-      // Netlify Env (hoặc fallback rỗng cho môi trường preview)
-      const apiKey = import.meta.env?.VITE_GEMINI_API_KEY || ""; 
+      const apiKey = "YOUR_GEMINI_API_KEY_HERE"; 
       
-      if (!apiKey) {
+      if (!apiKey || apiKey === "YOUR_GEMINI_API_KEY_HERE") {
         setAiAnalysis('LỖI: Chưa cấu hình VITE_GEMINI_API_KEY. Hãy cấp key từ Netlify.');
         setIsAnalyzing(false);
         return;
@@ -603,7 +606,7 @@ export default function AntiFragileTerminal() {
         Nhiệm vụ: Dựa vào trạng thái thị trường và lịch sử, trả lời bằng 3 câu tiếng Việt siêu ngắn gọn, lạnh lùng, máy móc. Lệnh hiện tại có tối ưu không? Lịch sử User có đang FOMO không?
       `;
 
-      // Cập nhật Interactions API với Gemini 3.5 Flash
+      // Cập nhật dùng endpoint interactions của Gemini API (gemini-3.5-flash)
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
         method: 'POST',
         headers: { 
@@ -624,17 +627,19 @@ export default function AntiFragileTerminal() {
       }
 
       const data = await response.json();
+      
+      // Parse output từ cấu trúc của interactions
       const outputStep = data.steps?.find(step => step.type === 'model_output');
-      const text = outputStep?.content?.[0]?.text;
+      const text = outputStep?.content?.[0]?.text || data?.candidates?.[0]?.content?.parts?.[0]?.text;
       
       setAiAnalysis(text || 'Vệ tinh AI Quant không phản hồi.');
-      setGeminiCooldown(15); // Đợi 15s giữa các lần phân tích thành công (15 RPM limit)
+      setGeminiCooldown(15); 
 
     } catch (error) {
       console.error(error);
       if (error.message === 'RATE_LIMIT') {
         setAiAnalysis('Lỗi 429: Vượt quá giới hạn Gemini API (Quá số lượt/phút). Đang khóa 1 phút để bảo vệ tài khoản...');
-        setGeminiCooldown(60); // Khóa 1 phút nếu bị Rate Limit
+        setGeminiCooldown(60); 
       } else {
         setAiAnalysis('Lỗi kết nối vệ tinh AI Quant. Mạng lưới ngoại tuyến.');
       }

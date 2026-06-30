@@ -3,16 +3,15 @@ import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCir
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
 // ==========================================
-// 1. SUPABASE & ENV SETUP (NETLIFY VITE)
+// 1. SUPABASE & ENV SETUP
 // ==========================================
-// LƯU Ý: Các dòng import.meta.env này sẽ hoạt động hoàn hảo khi chạy trên Netlify.
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''; 
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''; 
 const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || ''; 
 
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// --- LÕI TOÁN HỌC ĐỊNH LƯỢNG (PURE MATH CORE) ---
+// --- LÕI TOÁN HỌC ĐỊNH LƯỢNG (BỔ SUNG MACD & OBV) ---
 const QuantMath = {
   sma: (data, period) => {
     if (!data || data.length < period) return 0;
@@ -56,11 +55,9 @@ const QuantMath = {
     
     let dxs = [];
     for (let i = period; i < trs.length; i++) {
-      if (smoothedTR === 0) continue;
       smoothedTR = smoothedTR - (smoothedTR/period) + trs[i];
       smoothedPlusDM = smoothedPlusDM - (smoothedPlusDM/period) + plusDMs[i];
       smoothedMinusDM = smoothedMinusDM - (smoothedMinusDM/period) + minusDMs[i];
-      
       const plusDI = 100 * (smoothedPlusDM / smoothedTR);
       const minusDI = 100 * (smoothedMinusDM / smoothedTR);
       const dx = 100 * Math.abs(plusDI - minusDI) / (plusDI + minusDI || 1);
@@ -93,10 +90,30 @@ const QuantMath = {
     const sma = slice.reduce((a, b) => a + b, 0) / period;
     const variance = slice.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / period;
     const dev = Math.sqrt(variance);
-    const upper = sma + (stdDev * dev);
-    const lower = sma - (stdDev * dev);
-    const bbw = ((upper - lower) / sma) * 100; 
+    const bbw = (((sma + (stdDev * dev)) - (sma - (stdDev * dev))) / sma) * 100; 
     return { bbw };
+  },
+  macd: (closes, fast = 12, slow = 26, signal = 9) => {
+    if (closes.length < slow + signal) return { hist: 0, macd: 0, signal: 0 };
+    const fastEma = QuantMath.ema(closes, fast);
+    const slowEma = QuantMath.ema(closes, slow);
+    const macdLine = fastEma - slowEma;
+    // Xây dựng mảng MACD để tính Signal
+    let macdArray = [];
+    for(let i = slow; i <= closes.length; i++){
+       macdArray.push(QuantMath.ema(closes.slice(0, i), fast) - QuantMath.ema(closes.slice(0, i), slow));
+    }
+    const signalLine = QuantMath.ema(macdArray, signal);
+    return { macd: macdLine, signal: signalLine, hist: macdLine - signalLine };
+  },
+  obv: (closes, volumes) => {
+    if (closes.length < 2) return 0;
+    let obv = 0;
+    for (let i = 1; i < closes.length; i++) {
+      if (closes[i] > closes[i-1]) obv += volumes[i];
+      else if (closes[i] < closes[i-1]) obv -= volumes[i];
+    }
+    return obv;
   }
 };
 
@@ -116,12 +133,14 @@ export default function AntiFragileTerminal() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [geminiCooldown, setGeminiCooldown] = useState(0);
 
-  // Trạng thái Sentiment từ Binance API
-  const [sentimentData, setSentimentData] = useState({
+  // Trạng thái Sentiment & Vĩ mô (Kết hợp nhập tay và API)
+  const [macroData, setMacroData] = useState({
     capital: 10000,
     fgiValue: 50, 
     longShortRatio: 1.0, 
     takerBuySellRatio: 1.0, 
+    btcDominance: 55.0, // Thêm BTC.D
+    mvrvZScore: 1.2,    // Phục hồi lại để nhập tay
     newsTrap: false
   });
 
@@ -159,7 +178,7 @@ export default function AntiFragileTerminal() {
     return () => supabase.removeChannel(subscription);
   }, []);
 
-  // --- TỔNG LỰC DATA FETCHING TỪ BINANCE ---
+  // --- FETCH DỮ LIỆU TỪ BINANCE ---
   useEffect(() => {
     let isMounted = true;
     const fetchData = async () => {
@@ -168,7 +187,7 @@ export default function AntiFragileTerminal() {
         const oiInterval = ['15m', '1h', '4h', '1d'].includes(intervalTime) ? intervalTime : '1d';
         
         const [klinesRes, fundingRes, oiCurrentRes, oiHistRes, fgiRes, lsrRes, takerRes] = await Promise.all([
-          fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalTime}&limit=150`),
+          fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalTime}&limit=200`),
           fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=1`),
           fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`),
           fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=${oiInterval}&limit=30`),
@@ -207,6 +226,7 @@ export default function AntiFragileTerminal() {
         const closes = klines.map(d => parseFloat(d[4]) || 0);
         const highs = klines.map(d => parseFloat(d[2]) || 0);
         const lows = klines.map(d => parseFloat(d[3]) || 0);
+        const volumes = klines.map(d => parseFloat(d[5]) || 0);
         const currentPrice = closes[closes.length - 1] || 0;
 
         const oiValues = Array.isArray(oiHist) ? oiHist.map(d => parseFloat(d.sumOpenInterestValue) || 0) : [0];
@@ -218,17 +238,19 @@ export default function AntiFragileTerminal() {
         const sma200 = QuantMath.sma(closes, 200); 
         const rsiValue = QuantMath.rsi(closes, 14);
         const bollinger = QuantMath.bollinger(closes, 20);
+        const macdData = QuantMath.macd(closes);
+        const obvValue = QuantMath.obv(closes, volumes);
 
         setAutoData({
           currentPrice, atr14, atrPercent: currentPrice > 0 ? (atr14 / currentPrice) * 100 : 0, 
           adx: adxValue, sma200, fundingRate: (funding && funding[0]) ? parseFloat(funding[0].fundingRate) * 100 : 0,
           currentOi: currentOiValue, oiEma: oiEma14, isOiSpiking: currentOiValue > oiEma14,
-          rsi: rsiValue, bbw: bollinger.bbw
+          rsi: rsiValue, bbw: bollinger.bbw, macdHist: macdData.hist, obv: obvValue
         });
 
         setTradeSetup(prev => prev.entry === 0 ? { ...prev, entry: currentPrice } : prev);
         
-        setSentimentData(prev => ({ 
+        setMacroData(prev => ({ 
           ...prev, 
           fgiValue: fetchedFgi !== null ? fetchedFgi : prev.fgiValue,
           longShortRatio: currentLsr,
@@ -270,7 +292,7 @@ export default function AntiFragileTerminal() {
     let slPercent = totalSlDistance / tradeSetup.entry;
     if (!isFinite(slPercent) || isNaN(slPercent) || slPercent === 0) slPercent = 0.01;
 
-    const capitalSafe = sentimentData.capital > 0 ? sentimentData.capital : 10000;
+    const capitalSafe = macroData.capital > 0 ? macroData.capital : 10000;
     const riskAmountUSD = capitalSafe * (tradeSetup.riskPercent / 100);
     let positionSizeUSD = riskAmountUSD / slPercent;
     if (!isFinite(positionSizeUSD) || isNaN(positionSizeUSD)) positionSizeUSD = 0;
@@ -283,14 +305,14 @@ export default function AntiFragileTerminal() {
       slPercent: (slPercent * 100).toFixed(2), riskAmountUSD: riskAmountUSD.toFixed(2), positionSizeUSD: positionSizeUSD.toFixed(2),
       effectiveLeverage: effectiveLeverage.toFixed(2), isLeverageSafe, calculatedRR: calculatedRR.toFixed(2)
     };
-  }, [autoData, sentimentData, tradeSetup]);
+  }, [autoData, macroData, tradeSetup]);
 
   const handleMasterAuto = () => {
     if (!autoData || !mathCore) return;
     let suggestedType = 'FUTURES';
     let suggestedDirection = autoData.currentPrice > autoData.sma200 ? 'LONG' : 'SHORT';
     
-    if (autoData.rsi < 30 && sentimentData.fgiValue < 20 && intervalTime === '1d') {
+    if (autoData.rsi < 30 && macroData.fgiValue < 20 && intervalTime === '1d') {
       suggestedType = 'SPOT'; suggestedDirection = 'LONG';
     }
 
@@ -312,35 +334,32 @@ export default function AntiFragileTerminal() {
     if (!autoData || !mathCore) return [];
     
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;
-    const isLsrExtreme = sentimentData.longShortRatio > 2.5 || sentimentData.longShortRatio < 0.4;
+    const isLsrExtreme = macroData.longShortRatio > 2.5 || macroData.longShortRatio < 0.4;
     const isPsychoTrap = (isFundingExtreme && autoData.isOiSpiking) || isLsrExtreme;
-
     const isSqueeze = autoData.bbw < 5 && autoData.adx < 20; 
     
     return [
       { id: 1, passed: autoData.adx > 25 || isSqueeze, text: `MARKET REGIME: Xu hướng rõ (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%).` },
-      { id: 2, passed: tradeSetup.has3Indicators, text: "XÁC NHẬN ĐA LỚP: Đồng thuận 3 chỉ báo kỹ thuật." },
-      { id: 3, passed: !isPsychoTrap, text: `TÂM LÝ (BINANCE): Không dính bẫy (L/S Ratio: ${sentimentData.longShortRatio.toFixed(2)}, Taker: ${sentimentData.takerBuySellRatio.toFixed(2)}).` },
-      { id: 4, passed: tradeSetup.passedStopHunt && !sentimentData.newsTrap, text: "CHỐNG THAO TÚNG: Hoàn tất Retest, không kẹt bẫy Tin tức." },
+      { id: 2, passed: tradeSetup.has3Indicators, text: "XÁC NHẬN ĐA LỚP: Khớp tín hiệu Volume (OBV) & Động lượng (MACD)." },
+      { id: 3, passed: !isPsychoTrap, text: `TÂM LÝ (BINANCE): Không dính bẫy (L/S Ratio: ${macroData.longShortRatio.toFixed(2)}, Taker: ${macroData.takerBuySellRatio.toFixed(2)}).` },
+      { id: 4, passed: tradeSetup.passedStopHunt && !macroData.newsTrap, text: "CHỐNG THAO TÚNG: Hoàn tất Retest, không kẹt bẫy Tin tức." },
       { id: 5, passed: mathCore.isLeverageSafe && parseFloat(mathCore.positionSizeUSD) > 0, text: `TOÁN HỌC RISK: Đòn bẩy hiệu dụng an toàn (${mathCore.effectiveLeverage}x <= 5x).` },
       { id: 6, passed: parseFloat(mathCore.calculatedRR) >= 1.5 || tradeSetup.tradeType === 'SPOT', text: `KỲ VỌNG DƯƠNG: Risk/Reward đạt 1:${mathCore.calculatedRR}` },
     ];
-  }, [autoData, mathCore, tradeSetup, sentimentData]);
+  }, [autoData, mathCore, tradeSetup, macroData]);
 
   const isApproved = checklist.filter(c => c.passed).length >= 5 && !systemError;
 
   // ==========================================
-  // 🧠 GEMINI INTERACTIONS API (CHUẨN TÀI LIỆU V1BETA)
+  // 🧠 GEMINI INTERACTIONS API (PRO ECONOMIST & QUANT)
   // ==========================================
   const runGeminiAnalysis = async () => {
     if (geminiCooldown > 0) return;
     if (!autoData || !mathCore) return;
     
-    // Đọc API Key từ Netlify.
     const apiKey = geminiApiKey; 
-    
     if (!apiKey) {
-      setAiAnalysis('⚠️ LỖI: Chưa cấu hình VITE_GEMINI_API_KEY. Vui lòng thêm biến này vào Environment Variables trên Netlify.');
+      setAiAnalysis('⚠️ LỖI: Chưa cấu hình VITE_GEMINI_API_KEY trên Netlify.');
       return;
     }
 
@@ -349,17 +368,29 @@ export default function AntiFragileTerminal() {
     
     try {
       const prompt = `
-        Đóng vai AI Quant Analyst hệ thống "ANTI-FRAGILE V3.8". Phân tích dữ liệu Binance sau:
-        - Giá: $${autoData.currentPrice} | RSI(14): ${autoData.rsi.toFixed(1)}
-        - ADX: ${autoData.adx.toFixed(1)} | BBW (Squeeze): ${autoData.bbw.toFixed(2)}%
-        - Binance L/S Ratio: ${sentimentData.longShortRatio.toFixed(2)}
-        - Binance Taker Buy/Sell: ${sentimentData.takerBuySellRatio.toFixed(2)}
-        - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction}, R:R=1:${mathCore.calculatedRR}.
-        
-        Nhiệm vụ: Dựa vào sự đối lập hoặc đồng thuận của L/S Ratio và Taker Volume với hành động giá, lệnh này có rủi ro bị Stop-hunt không? Trả lời bằng đúng 3 câu tiếng Việt, lạnh lùng, định lượng.
+        Kích hoạt giao thức phân tích "ANTI-FRAGILE V3.9". 
+        Vai trò của bạn: Nhà Kinh tế học Vĩ mô & Chuyên gia Quant Trader hạng nặng. Lạnh lùng, khách quan, dựa hoàn toàn trên số liệu xác suất. Không khuyên bảo sáo rỗng.
+
+        BỐI CẢNH KỸ THUẬT (${symbol} - ${intervalTime}):
+        - Hành động giá: $${autoData.currentPrice} | Vị thế SMA200: ${autoData.currentPrice > autoData.sma200 ? 'Tích cực' : 'Tiêu cực'}
+        - Động lượng (Momentum): RSI = ${autoData.rsi.toFixed(1)} | MACD Histogram = ${autoData.macdHist.toFixed(2)}
+        - Xu hướng & Nén giá: ADX = ${autoData.adx.toFixed(1)} | BBW (Bollinger) = ${autoData.bbw.toFixed(2)}%
+        - Dòng tiền thực tế: OBV Value = ${autoData.obv.toFixed(0)}
+
+        BỐI CẢNH VĨ MÔ & TÂM LÝ (SENTIMENT):
+        - Binance L/S Ratio (Đám đông): ${macroData.longShortRatio.toFixed(2)}
+        - Binance Taker Buy/Sell (Cá mập khớp lệnh): ${macroData.takerBuySellRatio.toFixed(2)}
+        - BTC Dominance: ${macroData.btcDominance}% | FGI: ${macroData.fgiValue}/100 | MVRV: ${macroData.mvrvZScore}
+        - Funding Rate: ${autoData.fundingRate.toFixed(4)}% | OI Spiking: ${autoData.isOiSpiking ? 'Yes' : 'No'}
+
+        VỊ THẾ DỰ KIẾN (RISK MANAGEMENT):
+        - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction} | R:R = 1:${mathCore.calculatedRR}
+        - Đòn bẩy hiệu dụng: ${mathCore.effectiveLeverage}x | Risk/Lệnh: ${tradeSetup.riskPercent}%
+
+        Nhiệm vụ: Phân tích sự hội tụ (hoặc phân kỳ) giữa Dòng tiền (OBV, Taker, Dominance) và Hành động giá. Tìm kiếm các dấu hiệu bẫy thanh khoản (Squeeze/Stop-hunt) từ dữ liệu phái sinh. 
+        Đánh giá mức độ sống sót của Setup này. Trả lời sắc bén, chuyên môn cao trong đúng 4 câu tiếng Việt.
       `;
 
-      // Sử dụng Interactions API theo tài liệu Google với header x-goog-api-key
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
         method: 'POST',
         headers: { 
@@ -378,19 +409,17 @@ export default function AntiFragileTerminal() {
       }
       
       const data = await response.json();
-      
-      // Trích xuất text từ response schema của Interactions API
       const outputStep = data.steps?.find(step => step.type === 'model_output');
-      const textResponse = outputStep?.content?.[0]?.text || 'Vệ tinh AI không thể trích xuất phản hồi.';
+      const textResponse = outputStep?.content?.[0]?.text || 'Lỗi trích xuất ngôn ngữ từ AI.';
       
       setAiAnalysis(textResponse);
       setGeminiCooldown(15); 
     } catch (error) {
       console.error(error);
       if (error.message === 'RATE_LIMIT') {
-        setAiAnalysis('❌ Lỗi 429: Rate Limit (Quá tải yêu cầu). Vui lòng thử lại sau 1 phút.');
+        setAiAnalysis('❌ Lỗi 429: Rate Limit (Quá tải yêu cầu API). Chờ 30s.');
       } else {
-        setAiAnalysis('❌ Lỗi kết nối Gemini AI. Vui lòng kiểm tra lại cấu hình API Key của bạn trên Netlify.');
+        setAiAnalysis('❌ Lỗi kết nối Gemini AI. Kiểm tra biến môi trường.');
       }
       setGeminiCooldown(30); 
     }
@@ -405,16 +434,16 @@ export default function AntiFragileTerminal() {
         entry: parseFloat(tradeSetup.entry), sl: parseFloat(tradeSetup.slTech), tp: parseFloat(tradeSetup.tpTech),
         risk_amount_usd: parseFloat(mathCore.riskAmountUSD), rr: parseFloat(mathCore.calculatedRR),
         adx: autoData.adx, atr: autoData.atr14, funding_rate: autoData.fundingRate,
-        oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(sentimentData.fgiValue),
+        oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(macroData.fgiValue),
         trend_sma200: (autoData.currentPrice > autoData.sma200) ? 'ABOVE' : 'BELOW',
-        mvrv: sentimentData.longShortRatio, // Lưu L/S Ratio vào cột mvrv tạm thời
-        liquidations: sentimentData.takerBuySellRatio.toFixed(2), // Lưu Taker vào cột liquidations tạm
-        news_trap: Boolean(sentimentData.newsTrap), leverage: parseFloat(mathCore.effectiveLeverage),
+        mvrv: macroData.longShortRatio, // Tạm dùng cột mvrv cho LS Ratio
+        liquidations: macroData.takerBuySellRatio.toFixed(2), // Tạm dùng cột liquidations cho Taker
+        news_trap: Boolean(macroData.newsTrap), leverage: parseFloat(mathCore.effectiveLeverage),
         status: 'OPEN', pnl_usd: 0
       };
       const { error } = await supabase.from('trade_logs').insert([payload]);
       if (error) throw error;
-      showToast("☁️ Đã lưu Nhật ký giao dịch vào Supabase!");
+      showToast("☁️ Lệnh đã được niêm phong vào Supabase.");
     } catch (e) { showToast(`❌ Lỗi Ghi Log: ${e.message}`); }
   };
 
@@ -430,21 +459,32 @@ export default function AntiFragileTerminal() {
     }
     try {
       await supabase.from('trade_logs').update({ status: pnl >= 0 ? 'WIN' : 'LOSS', close_price: currentPx, pnl_usd: pnl }).eq('id', logId);
-      showToast(`✂️ Đã chốt lệnh! PnL: ${pnl.toFixed(2)}$`);
+      showToast(`✂️ Đã đóng vị thế. PnL: ${pnl.toFixed(2)}$`);
     } catch (e) { console.error(e); }
   };
 
   return (
     <div className="min-h-screen bg-[#0a0a0c] text-slate-200 font-mono p-2 md:p-6 selection:bg-emerald-500/30 relative">
       
+      {systemError && (
+        <div className="fixed top-0 left-0 w-full bg-red-600/90 text-white text-center py-1.5 text-xs font-bold z-[100] flex justify-center items-center gap-2 shadow-lg">
+          <ServerCrash className="w-4 h-4 animate-pulse"/> BINANCE API DOWN. KIỂM TRA LẠI MẠNG!
+        </div>
+      )}
+      {toast && (
+        <div className="fixed top-12 left-1/2 -translate-x-1/2 z-50 bg-slate-900 border border-slate-700 px-4 py-2 rounded shadow-2xl flex items-center gap-2">
+          <Bell className="w-4 h-4 text-emerald-400" /> <span className="text-xs">{toast}</span>
+        </div>
+      )}
+
       {/* HEADER */}
       <div className="max-w-7xl mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-slate-800/80 pb-5">
         <div>
           <h1 className="text-xl md:text-2xl font-black text-emerald-500 flex items-center gap-2 tracking-tighter">
-            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V3.8</span>
+            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V3.9 (Pro Quant)</span>
           </h1>
           <p className="text-slate-500 text-[10px] mt-1 uppercase tracking-widest">
-            {lastUpdated ? `Binance Sync: ${lastUpdated.toLocaleTimeString()}` : 'Đang kết nối API...'}
+            {lastUpdated ? `Thị trường: ${lastUpdated.toLocaleTimeString()}` : 'Khởi động Core...'}
           </p>
         </div>
         
@@ -471,42 +511,53 @@ export default function AntiFragileTerminal() {
         {/* CỘT TRÁI */}
         <div className="lg:col-span-7 space-y-6">
           
-          {/* BINANCE SENTIMENT */}
+          {/* MACRO & SENTIMENT */}
           <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 shadow-xl">
             <h2 className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-2 mb-4">
-              <Database className="w-3 h-3 text-purple-400" /> THÔNG SỐ TÂM LÝ & DÒNG TIỀN (BINANCE API)
+              <Database className="w-3 h-3 text-purple-400" /> VĨ MÔ & TÂM LÝ DÒNG TIỀN (MANUAL & API)
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
-                  <label className="text-[8px] text-slate-500 block mb-1">VỐN TỔNG (USD)</label>
-                  <input type="number" value={sentimentData.capital} onChange={e => setSentimentData({...sentimentData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-bold outline-none text-sm"/>
-                </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">GLOBAL L/S RATIO</label>
-                  <div className={`font-bold text-sm mt-1 ${sentimentData.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
-                    {sentimentData.longShortRatio.toFixed(2)}
+                  <div className={`font-bold text-sm mt-1 ${macroData.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
+                    {macroData.longShortRatio.toFixed(2)}
                   </div>
                 </div>
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">TAKER BUY/SELL</label>
-                  <div className={`font-bold text-sm mt-1 ${sentimentData.takerBuySellRatio > 1 ? 'text-emerald-500' : 'text-red-500'}`}>
-                    {sentimentData.takerBuySellRatio.toFixed(2)}
+                  <div className={`font-bold text-sm mt-1 ${macroData.takerBuySellRatio > 1 ? 'text-emerald-500' : 'text-red-500'}`}>
+                    {macroData.takerBuySellRatio.toFixed(2)}
                   </div>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-amber-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">BTC DOMINANCE (%)</label>
+                  <input type="number" step="0.1" value={macroData.btcDominance} onChange={e => setMacroData({...macroData, btcDominance: Number(e.target.value)})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-sm"/>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-blue-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">MVRV Z-SCORE</label>
+                  <input type="number" step="0.1" value={macroData.mvrvZScore} onChange={e => setMacroData({...macroData, mvrvZScore: Number(e.target.value)})} className="w-full bg-transparent text-blue-400 font-bold outline-none text-sm"/>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-emerald-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">VỐN TỔNG (USD)</label>
+                  <input type="number" value={macroData.capital} onChange={e => setMacroData({...macroData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-bold outline-none text-sm"/>
                 </div>
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">FEAR & GREED</label>
-                  <input type="number" value={sentimentData.fgiValue} onChange={e => setSentimentData({...sentimentData, fgiValue: Number(e.target.value)})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-sm"/>
+                  <input type="number" value={macroData.fgiValue} onChange={e => setMacroData({...macroData, fgiValue: Number(e.target.value)})} className="w-full bg-transparent text-orange-400 font-bold outline-none text-sm"/>
                 </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 flex items-center justify-center">
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 flex items-center justify-center col-span-2">
                    <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-slate-400 hover:text-red-400 transition-colors">
-                     <input type="checkbox" checked={sentimentData.newsTrap} onChange={e => setSentimentData({...sentimentData, newsTrap: e.target.checked})} className="accent-red-500 w-3 h-3 bg-black"/>
-                     Bẫy Tin Tức
+                     <input type="checkbox" checked={macroData.newsTrap} onChange={e => setMacroData({...macroData, newsTrap: e.target.checked})} className="accent-red-500 w-3 h-3 bg-black"/>
+                     Thị trường có Bẫy Tin Tức (News Trap)
                    </label>
                 </div>
             </div>
-            <div className="mt-3 flex gap-4 text-[9px] text-slate-500">
-              <span>* RSI(14): <strong className={autoData?.rsi > 70 ? 'text-red-400' : autoData?.rsi < 30 ? 'text-emerald-400' : 'text-slate-300'}>{autoData?.rsi.toFixed(1) || '0.0'}</strong></span>
-              <span>* BBW (Squeeze): <strong>{autoData?.bbw.toFixed(2) || '0.00'}%</strong></span>
+            
+            <div className="mt-4 p-2 bg-slate-900/50 rounded border border-slate-800 grid grid-cols-4 gap-2 text-center">
+               <div><span className="block text-[8px] text-slate-500">RSI (14)</span><span className={`text-[10px] font-bold ${autoData?.rsi > 70 ? 'text-red-400' : autoData?.rsi < 30 ? 'text-emerald-400' : 'text-slate-300'}`}>{autoData?.rsi.toFixed(1) || '0.0'}</span></div>
+               <div><span className="block text-[8px] text-slate-500">MACD HIST</span><span className={`text-[10px] font-bold ${autoData?.macdHist > 0 ? 'text-emerald-400' : 'text-red-400'}`}>{autoData?.macdHist.toFixed(2) || '0.00'}</span></div>
+               <div><span className="block text-[8px] text-slate-500">OBV</span><span className="text-[10px] font-bold text-blue-400">{autoData?.obv > 1000 ? (autoData?.obv/1000).toFixed(1)+'K' : autoData?.obv.toFixed(0) || '0'}</span></div>
+               <div><span className="block text-[8px] text-slate-500">BBW SQUEEZE</span><span className={`text-[10px] font-bold ${autoData?.bbw < 5 ? 'text-amber-400' : 'text-slate-300'}`}>{autoData?.bbw.toFixed(2) || '0.00'}%</span></div>
             </div>
           </div>
 
@@ -578,28 +629,30 @@ export default function AntiFragileTerminal() {
         {/* CỘT PHẢI */}
         <div className="lg:col-span-5 flex flex-col gap-6">
           
+          {/* AI QUANT BOT */}
           <div className="bg-[#111116] border border-blue-900/40 rounded-xl p-4">
              <h2 className="text-[10px] font-bold text-blue-400 uppercase flex items-center gap-2 mb-3">
-               <Bot className="w-3.5 h-3.5" /> GEMINI AI QUANT (v1beta Interactions)
+               <Bot className="w-3.5 h-3.5" /> GEMINI QUANT ECONOMIST (V1BETA)
              </h2>
              <button onClick={runGeminiAnalysis} disabled={isAnalyzing || !autoData || geminiCooldown > 0} className="w-full py-2 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded text-[10px] font-bold flex items-center justify-center gap-2">
                {isAnalyzing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BrainCircuit className="w-3.5 h-3.5" />}
-               PHÂN TÍCH RỦI RO LỆNH NÀY
+               ĐÁNH GIÁ MỨC ĐỘ SINH TỒN
              </button>
              {aiAnalysis && (
-               <div className="mt-3 bg-[#0a0a0c] p-3 rounded border border-blue-900/30 text-[10px] text-slate-300 whitespace-pre-line leading-relaxed">
+               <div className="mt-3 bg-[#0a0a0c] p-3 rounded border border-blue-900/30 text-[10.5px] text-slate-300 whitespace-pre-line leading-relaxed">
                  <span className="text-blue-500 mr-1">{'>'}</span> {aiAnalysis}
                </div>
              )}
           </div>
 
+          {/* CHECKLIST */}
           <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 flex-grow flex flex-col">
              <h2 className="text-[10px] font-bold text-slate-300 uppercase mb-4 flex items-center gap-2 border-b border-slate-800 pb-2"><ShieldAlert className="w-4 h-4 text-emerald-500" /> BỘ LỌC KIỂM DUYỆT (5/6 PASSED)</h2>
              
              <div className="mb-3 space-y-2 bg-[#0a0a0c] p-2.5 rounded border border-slate-800">
                <label className="flex items-center gap-2 text-[10px] text-slate-300">
                  <input type="checkbox" checked={tradeSetup.has3Indicators} onChange={e => setTradeSetup({...tradeSetup, has3Indicators: e.target.checked})} className="accent-emerald-500"/>
-                 3 Chỉ báo kỹ thuật đồng thuận
+                 Giao cắt Momentum (MACD) & Khớp khối lượng (OBV)
                </label>
                <label className="flex items-center gap-2 text-[10px] text-slate-300">
                  <input type="checkbox" checked={tradeSetup.passedStopHunt} onChange={e => setTradeSetup({...tradeSetup, passedStopHunt: e.target.checked})} className="accent-emerald-500"/>

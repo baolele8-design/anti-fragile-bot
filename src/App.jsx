@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3, Lock, Settings2 } from 'lucide-react';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js';
+import { createClient } from 'supabase/supabase-js';
 
 // ==========================================
 // 1. SUPABASE & ENV SETUP

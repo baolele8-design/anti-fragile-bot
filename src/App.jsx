@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Target, AlertTriangle, Save, History, Bell } from 'lucide-react';
-import { createClient } from '@supabase/supabase-js';
+import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Target, AlertTriangle, Save, History, Bell, Link2 } from 'lucide-react';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
-// --- SUPABASE INITIALIZATION ---
-// Đọc biến môi trường từ Vite (Khi chạy local hoặc trên Netlify)
-const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const supabaseKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_KEY';
+// ==========================================
+// 1. SUPABASE INITIALIZATION (CẤU HÌNH NETLIFY)
+// ==========================================
+// ⚠️ KHI CHẠY TRÊN NETLIFY: Hãy cấu hình các biến này trong Environment Variables
+const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL || 'YOUR_SUPABASE_URL'; 
+const supabaseKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_KEY'; 
 
-// Khởi tạo client (Sẽ trả về null nếu bạn chưa điền key thật để tránh crash web)
 const supabase = (supabaseUrl !== 'YOUR_SUPABASE_URL' && supabaseUrl) 
   ? createClient(supabaseUrl, supabaseKey) 
   : null;
@@ -81,16 +82,22 @@ export default function AntiFragileTerminal() {
   const [toast, setToast] = useState('');
   const [tradeLogs, setTradeLogs] = useState([]);
 
+  // Cấu hình Rate Limit (Cooldown)
+  const [isSyncingCq, setIsSyncingCq] = useState(false);
+  const [cqCooldown, setCqCooldown] = useState(0); 
+  const [geminiCooldown, setGeminiCooldown] = useState(0);
+
   // Gemini AI State
   const [aiAnalysis, setAiAnalysis] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
-  // States Thủ Công
-  const [manualData, setManualData] = useState({
+  // States Dữ Liệu (Hỗ trợ Thủ công & Đồng bộ CryptoQuant)
+  const [onchainData, setOnchainData] = useState({
     capital: 10000,
     mvrvZScore: 1.2,
     liquidations: 'Chưa có Spike', 
-    newsTrap: false
+    newsTrap: false,
+    isAutoSynced: false
   });
 
   // States Thiết Lập Giao Dịch
@@ -105,7 +112,22 @@ export default function AntiFragileTerminal() {
     passedStopHunt: false 
   });
 
-  // --- LẤY DỮ LIỆU TỪ SUPABASE (THAY THẾ FIREBASE) ---
+  // --- QUẢN LÝ THỜI GIAN COOLDOWN (BẢO VỆ API RATE LIMIT) ---
+  useEffect(() => {
+    if (cqCooldown > 0) {
+      const timer = setTimeout(() => setCqCooldown(c => c - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [cqCooldown]);
+
+  useEffect(() => {
+    if (geminiCooldown > 0) {
+      const timer = setTimeout(() => setGeminiCooldown(c => c - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [geminiCooldown]);
+
+  // --- LẤY DỮ LIỆU TỪ SUPABASE ---
   useEffect(() => {
     if (!supabase) return;
 
@@ -125,7 +147,7 @@ export default function AntiFragileTerminal() {
 
     fetchLogs();
 
-    // Subscribe realtime database thay đổi (Lắng nghe cả INSERT và UPDATE)
+    // Subscribe realtime database thay đổi
     const subscription = supabase
       .channel('public:trade_logs')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'trade_logs' }, (payload) => {
@@ -142,12 +164,11 @@ export default function AntiFragileTerminal() {
     };
   }, []);
 
-  // --- VỆ TINH THEO DÕI GIÁ VÀ TỰ ĐỘNG CHỐT LỆNH (AUTO-TRACKER) ---
+  // --- VỆ TINH THEO DÕI GIÁ VÀ TỰ ĐỘNG CHỐT LỆNH ---
   useEffect(() => {
     if (!supabase || !autoData || tradeLogs.length === 0) return;
 
     const checkOpenTrades = async () => {
-      // Lọc ra các lệnh đang OPEN của cặp tiền hiện tại
       const openTrades = tradeLogs.filter(log => log.status === 'OPEN' && log.symbol === symbol);
       
       for (const log of openTrades) {
@@ -160,11 +181,11 @@ export default function AntiFragileTerminal() {
           if (currentPx >= log.tp) {
             newStatus = 'WIN';
             closePrice = log.tp;
-            pnl = log.rr * log.risk_amount_usd; // Thắng = R:R * Risk
+            pnl = log.rr * log.risk_amount_usd; 
           } else if (currentPx <= log.sl) {
             newStatus = 'LOSS';
             closePrice = log.sl;
-            pnl = -log.risk_amount_usd; // Thua = Mất 1R
+            pnl = -log.risk_amount_usd; 
           }
         } else if (log.direction === 'SHORT') {
           if (currentPx <= log.tp) {
@@ -178,7 +199,6 @@ export default function AntiFragileTerminal() {
           }
         }
 
-        // Nếu chạm SL hoặc TP -> Gửi API Update lên Supabase
         if (newStatus) {
           try {
             await supabase
@@ -194,9 +214,89 @@ export default function AntiFragileTerminal() {
     };
 
     checkOpenTrades();
-  }, [autoData?.currentPrice, tradeLogs]); // Chạy lại mỗi khi giá tick
+  }, [autoData?.currentPrice, tradeLogs]);
 
-  // --- TỰ ĐỘNG LẤY DỮ LIỆU THỊ TRƯỜNG ---
+  // --- ĐỒNG BỘ DỮ LIỆU CRYPTOQUANT (QUẢN TRỊ RATE LIMIT) ---
+  const syncCryptoQuantData = async () => {
+    if (cqCooldown > 0) {
+      showToast(`⏳ Vui lòng đợi ${cqCooldown}s để đồng bộ CryptoQuant (Bảo vệ Rate Limit).`);
+      return;
+    }
+
+    setIsSyncingCq(true);
+    try {
+      const cqApiKey = import.meta.env?.VITE_CQ_API_KEY || "YOUR_CRYPTOQUANT_API_KEY"; 
+      
+      if (!cqApiKey || cqApiKey === "YOUR_CRYPTOQUANT_API_KEY") {
+        showToast("⚠️ Chưa cấu hình CryptoQuant Key. Sẽ dùng dữ liệu mô phỏng.");
+        setTimeout(() => {
+          setOnchainData(prev => ({
+            ...prev,
+            mvrvZScore: (Math.random() * (2.5 - 0.5) + 0.5).toFixed(2),
+            liquidations: Math.random() > 0.6 ? 'Long Spike' : 'Chưa có Spike',
+            isAutoSynced: true
+          }));
+          setIsSyncingCq(false);
+          setCqCooldown(30); // Mô phỏng: Đợi 30s mới được bấm lại
+          showToast("🔗 Đã đồng bộ On-chain Data (Dữ liệu mô phỏng)");
+        }, 1500);
+        return;
+      }
+
+      const coinFormat = symbol.substring(0, 3).toLowerCase();
+      const headers = { 'Authorization': `Bearer ${cqApiKey}` };
+
+      // 1. Gọi MVRV Z-Score
+      const mvrvRes = await fetch(`https://api.cryptoquant.com/v1/${coinFormat}/market-indicator/mvrv?limit=1`, { headers });
+      if (mvrvRes.status === 429) throw new Error('RATE_LIMIT');
+      if (!mvrvRes.ok) throw new Error('API_ERROR');
+      const mvrvData = await mvrvRes.json();
+      
+      // 2. Gọi Dữ liệu thanh lý
+      const liqRes = await fetch(`https://api.cryptoquant.com/v1/${coinFormat}/market-data/liquidations?limit=1`, { headers });
+      if (liqRes.status === 429) throw new Error('RATE_LIMIT');
+      if (!liqRes.ok) throw new Error('API_ERROR');
+      const liqData = await liqRes.json();
+
+      let newMvrv = onchainData.mvrvZScore;
+      let newLiqStatus = 'Chưa có Spike';
+
+      if (mvrvData?.result?.data?.length > 0) {
+        newMvrv = parseFloat(mvrvData.result.data[0].mvrv).toFixed(2);
+      }
+
+      if (liqData?.result?.data?.length > 0) {
+        const longs = parseFloat(liqData.result.data[0].long_liquidations_usd);
+        const shorts = parseFloat(liqData.result.data[0].short_liquidations_usd);
+        
+        if (longs > shorts * 2 && longs > 1000000) newLiqStatus = 'Long Spike';
+        else if (shorts > longs * 2 && shorts > 1000000) newLiqStatus = 'Short Spike';
+      }
+
+      setOnchainData(prev => ({
+        ...prev,
+        mvrvZScore: newMvrv,
+        liquidations: newLiqStatus,
+        isAutoSynced: true
+      }));
+
+      setCqCooldown(300); // Đợi 5 phút sau mỗi lần đồng bộ thành công (Bảo vệ 50 req/day)
+      showToast("🔗 Đã đồng bộ On-chain chuẩn từ CryptoQuant!");
+
+    } catch (e) {
+      console.error(e);
+      if (e.message === 'RATE_LIMIT') {
+        showToast("❌ Lỗi 429: Vượt quá giới hạn gói Free CryptoQuant (Max 50 req/ngày). Khóa 1 giờ.");
+        setCqCooldown(3600); // Block 1 tiếng để tránh spam
+      } else {
+        showToast("❌ Lỗi API CryptoQuant. Vui lòng kiểm tra lại Key.");
+      }
+    } finally {
+      setIsSyncingCq(false);
+    }
+  };
+
+  // --- TỰ ĐỘNG LẤY DỮ LIỆU THỊ TRƯỜNG TỪ BINANCE ---
   useEffect(() => {
     let isMounted = true;
     const fetchData = async () => {
@@ -255,7 +355,7 @@ export default function AntiFragileTerminal() {
         });
 
       } catch (error) {
-        console.error("Lỗi Fetch Data:", error);
+        console.error("Lỗi Fetch Data Binance:", error);
       }
       if (isMounted) setLoading(false);
     };
@@ -292,16 +392,16 @@ export default function AntiFragileTerminal() {
     const totalSlDistance = riskDiff + (1.2 * autoData.atr14);
     const slPercent = totalSlDistance / tradeSetup.entry;
     
-    const riskAmountUSD = manualData.capital * (tradeSetup.riskPercent / 100);
+    const riskAmountUSD = onchainData.capital * (tradeSetup.riskPercent / 100);
     const positionSizeUSD = riskAmountUSD / (slPercent || 1);
     
-    const effectiveLeverage = tradeSetup.tradeType === 'SPOT' ? (positionSizeUSD / manualData.capital) : (positionSizeUSD / manualData.capital);
+    const effectiveLeverage = tradeSetup.tradeType === 'SPOT' ? (positionSizeUSD / onchainData.capital) : (positionSizeUSD / onchainData.capital);
 
     let spotScore = 0;
     if (autoData.fgi7DaysLimit) spotScore += 1;
     if (autoData.currentPrice < autoData.sma200) spotScore += 1;
-    if (manualData.mvrvZScore < 0) spotScore += 1;
-    if (manualData.mvrvZScore < -0.5) spotScore += 1; 
+    if (onchainData.mvrvZScore < 0) spotScore += 1;
+    if (onchainData.mvrvZScore < -0.5) spotScore += 1; 
 
     return {
       slPercent: (slPercent * 100).toFixed(2),
@@ -312,7 +412,7 @@ export default function AntiFragileTerminal() {
       calculatedRR: calculatedRR.toFixed(2),
       spotScore: spotScore > 4 ? 4 : spotScore 
     };
-  }, [autoData, manualData, tradeSetup]);
+  }, [autoData, onchainData, tradeSetup]);
 
   // --- MASTER AUTO ENGINE ---
   const handleMasterAuto = () => {
@@ -370,15 +470,14 @@ export default function AntiFragileTerminal() {
     showToast("✅ Auto-Engine đã lên kịch bản giao dịch chuẩn xác!");
   };
 
-  // CHECKLIST THỰC THI
   const checklist = useMemo(() => {
     if (!autoData || !mathCore) return [];
     const c1 = autoData.adx < 20 || autoData.adx > 25; 
     const c2 = tradeSetup.has3Indicators; 
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;
     const isPsychoTrap = isFundingExtreme && autoData.isOiSpiking;
-    const c3 = !isPsychoTrap && manualData.liquidations === 'Chưa có Spike';
-    const c4 = tradeSetup.passedStopHunt && !manualData.newsTrap; 
+    const c3 = !isPsychoTrap && onchainData.liquidations === 'Chưa có Spike';
+    const c4 = tradeSetup.passedStopHunt && !onchainData.newsTrap; 
     const c5 = mathCore.isLeverageSafe && parseFloat(mathCore.positionSizeUSD) > 0; 
     const c6 = mathCore.calculatedRR >= 1.5 || tradeSetup.tradeType === 'SPOT'; 
 
@@ -390,12 +489,11 @@ export default function AntiFragileTerminal() {
       { id: 5, passed: c5, text: `TOÁN HỌC RISK: Đòn bẩy hiệu dụng an toàn (${mathCore.effectiveLeverage}x <= 5x).` },
       { id: 6, passed: c6, text: `KỲ VỌNG DƯƠNG: ${tradeSetup.tradeType === 'SPOT' ? 'Lệnh Spot dài hạn (Bỏ qua R:R ngắn).' : `Tỷ lệ R:R chuẩn (1:${mathCore.calculatedRR}).`}` },
     ];
-  }, [autoData, mathCore, tradeSetup, manualData]);
+  }, [autoData, mathCore, tradeSetup, onchainData]);
 
   const passedCount = checklist.filter(c => c.passed).length;
   const isApproved = passedCount >= 5;
 
-  // --- LƯU NHẬT KÝ LÊN SUPABASE ---
   const handleSaveTradeLog = async () => {
     if (!supabase) {
       showToast("❌ Supabase chưa được cấu hình! Thêm VITE_SUPABASE_URL vào .env");
@@ -405,7 +503,6 @@ export default function AntiFragileTerminal() {
       const { error } = await supabase
         .from('trade_logs')
         .insert([{
-          // 1. Dữ liệu Cơ học
           symbol,
           interval,
           type: tradeSetup.tradeType,
@@ -415,22 +512,16 @@ export default function AntiFragileTerminal() {
           tp: tradeSetup.tpTech,
           risk_amount_usd: parseFloat(mathCore.riskAmountUSD),
           rr: parseFloat(mathCore.calculatedRR),
-          
-          // 2. Dữ liệu AI Context
           adx: autoData.adx,
           atr: autoData.atr14,
           funding_rate: autoData.fundingRate,
           oi_spiking: autoData.isOiSpiking,
           fgi: autoData.fgiValue,
           trend_sma200: autoData.currentPrice > autoData.sma200 ? 'ABOVE' : 'BELOW',
-          
-          // 3. Tâm lý & Con người
-          mvrv: manualData.mvrvZScore,
-          liquidations: manualData.liquidations,
-          news_trap: manualData.newsTrap,
+          mvrv: onchainData.mvrvZScore,
+          liquidations: onchainData.liquidations,
+          news_trap: onchainData.newsTrap,
           leverage: parseFloat(mathCore.effectiveLeverage),
-
-          // 4. Trạng thái lệnh (MỚI)
           status: 'OPEN',
           pnl_usd: 0,
           close_price: null
@@ -440,21 +531,18 @@ export default function AntiFragileTerminal() {
       showToast("☁️ Đã sao lưu Bối cảnh & Mở trạng thái OPEN trên Supabase!");
     } catch (e) {
       console.error(e);
-      showToast("❌ Lỗi lưu dữ liệu: Kiểm tra lại cấu hình Supabase.");
+      showToast("❌ Lỗi lưu dữ liệu: Kiểm tra quyền (RLS) trên Supabase.");
     }
   };
 
-  // --- MANUAL CLOSE THỦ CÔNG ---
   const handleManualClose = async (logId, direction, entry, riskUsd, rr) => {
     if (!supabase || !autoData) return;
-    // Tính PnL sơ bộ dựa trên giá hiện tại
     const currentPx = autoData.currentPrice;
     let pnl = 0;
     
-    // Giả lập tính PnL tay (Tương đối)
     if (direction === 'LONG') {
        const percentMove = (currentPx - entry) / entry;
-       pnl = percentMove * 100 * (riskUsd / (Math.abs(entry - tradeSetup.slTech)/entry*100)); // Công thức ước tính
+       pnl = percentMove * 100 * (riskUsd / (Math.abs(entry - tradeSetup.slTech)/entry*100)); 
     } else {
        const percentMove = (entry - currentPx) / entry;
        pnl = percentMove * 100 * (riskUsd / (Math.abs(entry - tradeSetup.slTech)/entry*100));
@@ -473,51 +561,83 @@ export default function AntiFragileTerminal() {
     }
   };
 
-  // --- GEMINI AI QUANT ANALYST ---
+  // ==========================================
+  // 2. GEMINI AI QUANT ANALYST CẤP CAO (QUẢN TRỊ RATE LIMIT)
+  // ==========================================
   const runGeminiAnalysis = async () => {
+    if (geminiCooldown > 0) {
+      showToast(`⏳ Vui lòng đợi ${geminiCooldown}s để phân tích lại AI.`);
+      return;
+    }
+
     if (!autoData || !mathCore) return;
     setIsAnalyzing(true);
     setAiAnalysis('');
     
     try {
-      const apiKey = ""; 
+      // Netlify Env (hoặc fallback rỗng cho môi trường preview)
+      const apiKey = import.meta.env?.VITE_GEMINI_API_KEY || ""; 
       
+      if (!apiKey) {
+        setAiAnalysis('LỖI: Chưa cấu hình VITE_GEMINI_API_KEY. Hãy cấp key từ Netlify.');
+        setIsAnalyzing(false);
+        return;
+      }
+
       const recentLogs = tradeLogs.slice(0, 3).map(log => 
-        `- Lệnh cũ: ${log.type} ${log.direction} ${log.symbol}, R:R=1:${log.rr}, Status: Đã lưu Supabase`
+        `- Lệnh cũ: ${log.type} ${log.direction} ${log.symbol}, R:R=1:${log.rr}, Status: ${log.status}`
       ).join('\n');
 
       const prompt = `
-        Đóng vai AI Quant Analyst trong hệ thống "ANTI-FRAGILE V3.3".
+        Đóng vai AI Quant Analyst trong hệ thống "ANTI-FRAGILE V3.6".
         Dữ liệu thời gian thực (${symbol} - ${interval}):
         - Giá: $${autoData.currentPrice}
         - ADX: ${autoData.adx.toFixed(2)} | Biến động (ATR): ${autoData.atr14.toFixed(2)}
-        - MVRV Z-Score: ${manualData.mvrvZScore}
+        - MVRV Z-Score: ${onchainData.mvrvZScore}
         - OI Spike: ${autoData.isOiSpiking ? 'Có' : 'Không'}
-        - Setup hiện tại: ${tradeSetup.tradeType} ${tradeSetup.direction}, R:R = 1:${mathCore.calculatedRR}, Đòn bẩy hiệu dụng: ${mathCore.effectiveLeverage}x.
+        - Setup hiện: ${tradeSetup.tradeType} ${tradeSetup.direction}, R:R = 1:${mathCore.calculatedRR}, Đòn bẩy hiệu dụng: ${mathCore.effectiveLeverage}x.
         
         Lịch sử 3 lệnh gần nhất:
         ${recentLogs || 'Chưa có dữ liệu lệnh cũ.'}
         
-        Nhiệm vụ: 
-        Dựa vào trạng thái thị trường và lịch sử, trả lời bằng 3 câu tiếng Việt siêu ngắn gọn, lạnh lùng, máy móc. 
-        Kết luận lệnh hiện tại có tối ưu không? Lịch sử đánh của User có đang bị cuốn (FOMO) không?
+        Nhiệm vụ: Dựa vào trạng thái thị trường và lịch sử, trả lời bằng 3 câu tiếng Việt siêu ngắn gọn, lạnh lùng, máy móc. Lệnh hiện tại có tối ưu không? Lịch sử User có đang FOMO không?
       `;
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+      // Cập nhật Interactions API với Gemini 3.5 Flash
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: "Bạn là hệ thống máy tính lượng hóa không có cảm xúc." }] }
+          model: "gemini-3.5-flash",
+          input: prompt
         })
       });
 
+      if (response.status === 429) {
+        throw new Error('RATE_LIMIT');
+      }
+      if (!response.ok) {
+        throw new Error('API_ERROR');
+      }
+
       const data = await response.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      setAiAnalysis(text || 'Vệ tinh AI Quant không phản hồi. Lỗi tín hiệu.');
+      const outputStep = data.steps?.find(step => step.type === 'model_output');
+      const text = outputStep?.content?.[0]?.text;
+      
+      setAiAnalysis(text || 'Vệ tinh AI Quant không phản hồi.');
+      setGeminiCooldown(15); // Đợi 15s giữa các lần phân tích thành công (15 RPM limit)
+
     } catch (error) {
       console.error(error);
-      setAiAnalysis('Lỗi kết nối vệ tinh AI Quant. Mạng lưới ngoại tuyến.');
+      if (error.message === 'RATE_LIMIT') {
+        setAiAnalysis('Lỗi 429: Vượt quá giới hạn Gemini API (Quá số lượt/phút). Đang khóa 1 phút để bảo vệ tài khoản...');
+        setGeminiCooldown(60); // Khóa 1 phút nếu bị Rate Limit
+      } else {
+        setAiAnalysis('Lỗi kết nối vệ tinh AI Quant. Mạng lưới ngoại tuyến.');
+      }
     }
     setIsAnalyzing(false);
   };
@@ -545,9 +665,9 @@ export default function AntiFragileTerminal() {
         <div>
           <h1 className="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-500 flex items-center gap-2">
             <BrainCircuit className="w-8 h-8 text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-            ANTI-FRAGILE V3.3
+            ANTI-FRAGILE V3.6
           </h1>
-          <p className="text-slate-500 text-xs mt-1 uppercase font-semibold tracking-[0.2em]">PostgreSQL Supabase Engine</p>
+          <p className="text-slate-500 text-xs mt-1 uppercase font-semibold tracking-[0.2em]">PostgreSQL Supabase & Gemini 3.5</p>
         </div>
         
         <div className="flex items-center gap-2 bg-slate-900/50 p-1.5 rounded-lg border border-slate-800">
@@ -577,58 +697,72 @@ export default function AntiFragileTerminal() {
 
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
         
-        {/* LÕI TRÁI (7 CỘT) */}
         <div className="lg:col-span-7 space-y-6">
           
-          {/* KHỐI 1: MANUAL INPUT (Vốn và Tham số) */}
+          {/* KHỐI 1: MANUAL & AUTO CQ INPUT */}
           <div className="bg-[#111116] border border-slate-800/80 rounded-2xl p-5 shadow-2xl relative">
-            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-[0.15em] mb-4 flex items-center gap-2 border-b border-slate-800/80 pb-3">
-               <Database className="w-4 h-4 text-purple-400" /> THÔNG SỐ CỐT LÕI (MANUAL DATA)
-            </h2>
+            <div className="flex items-center justify-between mb-4 border-b border-slate-800/80 pb-3">
+              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-[0.15em] flex items-center gap-2">
+                <Database className="w-4 h-4 text-purple-400" /> THÔNG SỐ ON-CHAIN & TÂM LÝ
+              </h2>
+              <div className="flex items-center gap-2">
+                <span className="text-[8px] text-slate-500 hidden sm:block">* Free Limit: 25 syncs/ngày</span>
+                <button onClick={syncCryptoQuantData} disabled={isSyncingCq || cqCooldown > 0} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${cqCooldown > 0 ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 shadow-[0_0_10px_rgba(168,85,247,0.1)]'}`}>
+                  {isSyncingCq ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
+                  {cqCooldown > 0 ? `ĐỢI ${cqCooldown}s` : 'Sync CryptoQuant'}
+                </button>
+              </div>
+            </div>
             
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="bg-[#16161c] p-2 rounded-lg border border-slate-800 focus-within:border-emerald-500/50 transition-colors">
                   <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest block mb-1">Vốn Hiện Tại ($)</label>
-                  <input type="number" value={manualData.capital} onChange={e => setManualData({...manualData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-black font-mono outline-none text-base"/>
+                  <input type="number" value={onchainData.capital} onChange={e => setOnchainData({...onchainData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-black font-mono outline-none text-base"/>
+                </div>
+                
+                <div className="bg-[#16161c] p-2 rounded-lg border border-slate-800 relative">
+                  <label className="text-[9px] text-slate-500 uppercase font-bold block mb-1 flex items-center justify-between">
+                    MVRV Z-Score 
+                    {onchainData.isAutoSynced && <span className="text-[7px] bg-purple-500/20 text-purple-400 px-1 rounded">AUTO</span>}
+                  </label>
+                  <input type="number" step="0.1" value={onchainData.mvrvZScore} readOnly={onchainData.isAutoSynced} onChange={e => setOnchainData({...onchainData, mvrvZScore: Number(e.target.value)})} className={`w-full bg-transparent text-blue-400 font-mono outline-none text-sm ${onchainData.isAutoSynced ? 'opacity-70' : ''}`}/>
                 </div>
                 
                 <div className="bg-[#16161c] p-2 rounded-lg border border-slate-800">
-                  <label className="text-[9px] text-slate-500 uppercase font-bold block mb-1">MVRV Z-Score</label>
-                  <input type="number" step="0.1" value={manualData.mvrvZScore} onChange={e => setManualData({...manualData, mvrvZScore: Number(e.target.value)})} className="w-full bg-transparent text-blue-400 font-mono outline-none text-sm"/>
-                </div>
-                
-                <div className="bg-[#16161c] p-2 rounded-lg border border-slate-800">
-                  <label className="text-[9px] text-slate-500 uppercase font-bold block mb-1">Liquidations</label>
-                  <select value={manualData.liquidations} onChange={e => setManualData({...manualData, liquidations: e.target.value})} className="w-full bg-transparent text-blue-400 font-mono outline-none text-xs cursor-pointer">
-                    <option value="Chưa có Spike">Bình thường</option>
-                    <option value="Long Spike">Quét Long</option>
-                    <option value="Short Spike">Quét Short</option>
-                  </select>
+                  <label className="text-[9px] text-slate-500 uppercase font-bold block mb-1 flex items-center justify-between">
+                    Liquidations
+                    {onchainData.isAutoSynced && <span className="text-[7px] bg-purple-500/20 text-purple-400 px-1 rounded">AUTO</span>}
+                  </label>
+                  {onchainData.isAutoSynced ? (
+                     <div className="text-blue-400 font-mono text-xs mt-1.5 opacity-70">{onchainData.liquidations}</div>
+                  ) : (
+                    <select value={onchainData.liquidations} onChange={e => setOnchainData({...onchainData, liquidations: e.target.value})} className="w-full bg-transparent text-blue-400 font-mono outline-none text-xs cursor-pointer">
+                      <option value="Chưa có Spike">Bình thường</option>
+                      <option value="Long Spike">Quét Long</option>
+                      <option value="Short Spike">Quét Short</option>
+                    </select>
+                  )}
                 </div>
                 
                 <div className="bg-[#16161c] p-2 rounded-lg border border-slate-800 flex items-center justify-center">
                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300 hover:text-white transition-colors group">
-                     <input type="checkbox" checked={manualData.newsTrap} onChange={e => setManualData({...manualData, newsTrap: e.target.checked})} className="w-4 h-4 accent-red-500 bg-black"/>
+                     <input type="checkbox" checked={onchainData.newsTrap} onChange={e => setOnchainData({...onchainData, newsTrap: e.target.checked})} className="w-4 h-4 accent-red-500 bg-black"/>
                      Bẫy Tin Tức
                    </label>
                 </div>
             </div>
           </div>
 
-          {/* KHỐI 2: TOÁN HỌC RISK & AUTO MASTER ENGINE */}
           <div className="bg-[#111116] border border-slate-800/80 rounded-2xl p-5 shadow-2xl relative overflow-hidden">
              
-             {/* Nút Master Auto To Khổng Lồ */}
              <button onClick={handleMasterAuto} disabled={!autoData} className="w-full mb-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black py-4 rounded-xl shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all flex items-center justify-center gap-3 uppercase tracking-widest text-sm hover:scale-[1.01]">
                 <Zap className="w-5 h-5 fill-current" /> SÁNG TẠO CHIẾN LƯỢC TỰ ĐỘNG (AUTO-ENGINE)
              </button>
 
              <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                 
-                {/* Form Kết quả Auto */}
                 <div className="md:col-span-7 space-y-4">
                   
-                  {/* Phân bổ Môi Trường và Hướng */}
                   <div className="flex gap-2">
                     <div className="flex bg-[#16161c] rounded-lg p-1 border border-slate-800 flex-1">
                       <button onClick={() => setTradeSetup({...tradeSetup, tradeType: 'FUTURES'})} className={`flex-1 py-1.5 text-[10px] font-black uppercase rounded-md transition-all ${tradeSetup.tradeType === 'FUTURES' ? 'bg-indigo-500 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -669,7 +803,6 @@ export default function AntiFragileTerminal() {
                   </div>
                 </div>
 
-                {/* Kết Quả Tính Toán Risk & Data Check */}
                 <div className="md:col-span-5 bg-[#16161c] p-4 rounded-xl border border-slate-800 font-mono text-xs flex flex-col justify-between shadow-inner">
                   <div>
                     <div className="flex justify-between items-center border-b border-slate-800/80 pb-2 mb-2">
@@ -700,7 +833,6 @@ export default function AntiFragileTerminal() {
              </div>
           </div>
 
-          {/* KHỐI 3: SUPABASE LOG & HISTORY VIEW */}
           <div className="bg-[#111116] border border-slate-800/80 rounded-2xl p-5 shadow-2xl relative">
             <h2 className="text-xs font-bold text-slate-400 uppercase tracking-[0.15em] mb-4 flex items-center gap-2 border-b border-slate-800/80 pb-3">
                <History className="w-4 h-4 text-emerald-400" /> SUPABASE TRADE LOGS ({tradeLogs.length})
@@ -752,10 +884,8 @@ export default function AntiFragileTerminal() {
           </div>
         </div>
 
-        {/* LÕI PHẢI (5 CỘT) */}
         <div className="lg:col-span-5 flex flex-col gap-6">
           
-          {/* KHỐI 4: GEMINI AI & PHÂN TÍCH NHẬT KÝ */}
           <div className="bg-[#111116] border border-blue-900/30 rounded-2xl p-5 shadow-2xl relative">
              <div className="absolute top-3 right-3 text-blue-500/20"><Bot className="w-12 h-12" /></div>
              <h2 className="text-xs font-bold text-blue-400 uppercase tracking-[0.15em] mb-4 flex items-center gap-2">
@@ -764,9 +894,9 @@ export default function AntiFragileTerminal() {
              
              <div className="space-y-4 relative z-10">
                
-               <button onClick={runGeminiAnalysis} disabled={isAnalyzing || !autoData} className="w-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 py-3 rounded-lg text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2">
+               <button onClick={runGeminiAnalysis} disabled={isAnalyzing || !autoData || geminiCooldown > 0} className={`w-full py-3 rounded-lg text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${geminiCooldown > 0 ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700' : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30'}`}>
                  {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <BrainCircuit className="w-4 h-4" />}
-                 AI ĐỌC LỊCH SỬ & THỊ TRƯỜNG
+                 {geminiCooldown > 0 ? `ĐANG KHÔI PHỤC KẾT NỐI AI (${geminiCooldown}s)` : 'AI ĐỌC LỊCH SỬ & THỊ TRƯỜNG'}
                </button>
 
                {aiAnalysis && (
@@ -777,7 +907,6 @@ export default function AntiFragileTerminal() {
              </div>
           </div>
 
-          {/* KHỐI 5: EXECUTION CHECKLIST 5/6 */}
           <div className="bg-[#111116] border border-slate-800/80 rounded-2xl p-5 flex-grow flex flex-col shadow-2xl relative">
              <div className="absolute top-0 right-0 p-3"><ShieldAlert className="w-20 h-20 text-slate-800/30 pointer-events-none" /></div>
              <h2 className="text-xs font-black text-slate-300 uppercase tracking-[0.15em] mb-4 flex items-center gap-2 border-b border-slate-800/80 pb-3 relative z-10">

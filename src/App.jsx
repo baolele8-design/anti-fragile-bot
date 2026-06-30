@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3, Lock, Percent } from 'lucide-react';
+import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3, Lock, Settings2 } from 'lucide-react';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
 // ==========================================
@@ -11,7 +11,7 @@ const geminiApiKey = import.meta.env?.VITE_GEMINI_API_KEY || '';
 
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// --- LÕI TOÁN HỌC (THÊM SPREAD COST TỪ BÀI BÁO ALTCOIN SOCIAL MEDIA) ---
+// --- LÕI TOÁN HỌC QUANTMATH ---
 const QuantMath = {
   sma: (data, period) => {
     if (!data || data.length < period) return 0;
@@ -85,13 +85,15 @@ const QuantMath = {
     return 100 - (100 / (1 + rs));
   },
   bollinger: (closes, period = 20, stdDev = 2) => {
-    if (closes.length < period) return { bbw: 0 };
+    if (closes.length < period) return { bbw: 0, upper: 0, lower: 0, sma: 0 };
     const slice = closes.slice(-period);
     const sma = slice.reduce((a, b) => a + b, 0) / period;
     const variance = slice.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / period;
     const dev = Math.sqrt(variance);
-    const bbw = (((sma + (stdDev * dev)) - (sma - (stdDev * dev))) / sma) * 100; 
-    return { bbw };
+    const upper = sma + (stdDev * dev);
+    const lower = sma - (stdDev * dev);
+    const bbw = ((upper - lower) / sma) * 100; 
+    return { bbw, upper, lower, sma };
   },
   obv: (closes, volumes) => {
     if (closes.length < 2) return 0;
@@ -102,11 +104,10 @@ const QuantMath = {
     }
     return obv;
   },
-  // MA SÁT THỊ TRƯỜNG: Bổ sung Bid-Ask Spread cho Altcoin
   costDrag: (entryPrice, tradeType, execution, fundingRate, spreadPercent, holdingDays = 1) => {
     const slippage = execution === 'MARKET' ? 0.001 : 0; 
     const fee = execution === 'MARKET' ? 0.0004 : 0.0002;
-    const spreadCost = (spreadPercent / 100) / 2; // Nửa spread cho entry, nửa cho exit
+    const spreadCost = (spreadPercent / 100) / 2;
     const fundingDrag = tradeType === 'FUTURES' ? (fundingRate * holdingDays) : 0;
     return (slippage + fee + spreadCost) * 2 * entryPrice + Math.abs(fundingDrag * entryPrice); 
   },
@@ -114,8 +115,7 @@ const QuantMath = {
     if(winRate === 0 || historicalAvgRR === 0) return 0;
     const W = winRate;
     const R = historicalAvgRR;
-    const kelly = W - ((1 - W) / R);
-    return kelly; 
+    return W - ((1 - W) / R);
   }
 };
 
@@ -139,44 +139,41 @@ export default function AntiFragileTerminal() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [geminiCooldown, setGeminiCooldown] = useState(0);
 
-  // DỮ LIỆU VĨ MÔ & SENTIMENT (Kiểm soát "Thông số ma")
-  const [macroData, setMacroData] = useState({
-    capital: 10000,
+  // --- DỮ LIỆU TỪ API (Tính toán 100% bằng thuật toán) ---
+  const [apiMacro, setApiMacro] = useState({
     fgiValue: 50, 
     longShortRatio: 1.0, 
     takerBuySellRatio: 1.0, 
-    btcDominance: 55.0, 
-    mvrvZScore: 1.2,    
-    toxicFlow: 'LOW', 
-    socialSentiment: 'NEUTRAL', 
-    isWeekend: false, // Phá vỡ đồng liên kết Vĩ mô (Cointegration Breakdown)
-    volatilitySkew: 'NORMAL', 
-    bidAskSpread: 0.01 // Phí ẩn của Altcoin (Mặc định BTC là 0.01%)
+    btcDominance: 50.0, // Kéo từ BTCDOMUSDT
+    toxicFlow: 'LOW',   // Tính toán từ Khối lượng, OI và Taker
+    volatilitySkew: 'NORMAL', // Tính toán từ Đuôi béo BB 2.5SD & ATR
+    isWeekend: false 
+  });
+
+  // --- DỮ LIỆU NHẬP TAY (Bảng điều khiển thủ công) ---
+  const [manualData, setManualData] = useState({
+    capital: 10000,
+    bidAskSpread: 0.01,
+    mvrvZScore: 1.2,
+    socialSentiment: 'NEUTRAL'
   });
 
   const [tradeSetup, setTradeSetup] = useState({
-    tradeType: 'FUTURES',
-    direction: 'LONG',
-    execution: 'LIMIT', 
-    riskPercent: 1.0, 
-    entry: 0,
-    slTech: 0,
-    tpTech: 0,
-    htfAligned: false, 
-    passedSFP: false 
+    tradeType: 'FUTURES', direction: 'LONG', execution: 'LIMIT', 
+    riskPercent: 1.0, entry: 0, slTech: 0, tpTech: 0,
+    htfAligned: false, passedSFP: false 
   });
 
-  // Xác định Cuối tuần (Cointegration Breakdown Risk)
   useEffect(() => {
     const today = new Date().getDay();
-    setMacroData(prev => ({ ...prev, isWeekend: (today === 0 || today === 6) }));
+    setApiMacro(prev => ({ ...prev, isWeekend: (today === 0 || today === 6) }));
   }, []);
 
   useEffect(() => {
     if (geminiCooldown > 0) { const t = setTimeout(() => setGeminiCooldown(c => c - 1), 1000); return () => clearTimeout(t); }
   }, [geminiCooldown]);
 
-  // --- SUPABASE SYNC (DỮ LIỆU LỊCH SỬ THẬT) ---
+  // --- SUPABASE SYNC ---
   useEffect(() => {
     if (!supabase) return;
     const fetchLogs = async () => {
@@ -217,7 +214,7 @@ export default function AntiFragileTerminal() {
     return () => supabase.removeChannel(subscription);
   }, [symbol]);
 
-  // --- FETCH DỮ LIỆU TỪ BINANCE & ALTERNATIVE (Sửa tận gốc Thông số ma) ---
+  // --- FETCH API THỰC CHỨNG & TÍNH TOÁN BIẾN SỐ TOXIC/FAT-TAIL ---
   useEffect(() => {
     let isMounted = true;
     const fetchData = async () => {
@@ -225,7 +222,7 @@ export default function AntiFragileTerminal() {
       try {
         const oiInterval = ['15m', '1h', '4h', '1d'].includes(intervalTime) ? intervalTime : '1d';
         
-        const [klinesLTFRes, klinesHTFRes, fundingRes, oiCurrentRes, oiHistRes, lsrRes, takerRes, fgiRes] = await Promise.all([
+        const [klinesLTFRes, klinesHTFRes, fundingRes, oiCurrentRes, oiHistRes, lsrRes, takerRes, fgiRes, btcDomRes] = await Promise.all([
           fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalTime}&limit=200`),
           fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=200`), 
           fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=1`),
@@ -233,7 +230,8 @@ export default function AntiFragileTerminal() {
           fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=${oiInterval}&limit=30`),
           fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
           fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
-          fetch('https://api.alternative.me/fng/?limit=1')
+          fetch('https://api.alternative.me/fng/?limit=1'),
+          fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCDOMUSDT') // Fetch BTCDOM
         ]);
 
         if (!isMounted) return;
@@ -245,9 +243,9 @@ export default function AntiFragileTerminal() {
         const oiCurrent = await oiCurrentRes.json();
         const oiHist = await oiHistRes.json();
 
-        // Kéo chuẩn xác Sentiment Binance
-        let currentLsr = macroData.longShortRatio;
-        let currentTaker = macroData.takerBuySellRatio;
+        // 1. Gán Sentiment Thực chứng
+        let currentLsr = apiMacro.longShortRatio;
+        let currentTaker = apiMacro.takerBuySellRatio;
         if (lsrRes.ok) {
           const lsrData = await lsrRes.json();
           if (lsrData && lsrData.length > 0) currentLsr = parseFloat(lsrData[lsrData.length-1].longShortRatio);
@@ -257,13 +255,16 @@ export default function AntiFragileTerminal() {
           if (takerData && takerData.length > 0) currentTaker = parseFloat(takerData[takerData.length-1].buySellRatio);
         }
 
-        // Kéo chuẩn xác FGI
-        let fetchedFgi = macroData.fgiValue;
+        let fetchedFgi = apiMacro.fgiValue;
         if (fgiRes.ok) {
           const fgiData = await fgiRes.json();
-          if (fgiData && fgiData.data && fgiData.data.length > 0) {
-            fetchedFgi = parseInt(fgiData.data[0].value);
-          }
+          if (fgiData?.data?.length > 0) fetchedFgi = parseInt(fgiData.data[0].value);
+        }
+
+        let currentBtcDom = apiMacro.btcDominance;
+        if (btcDomRes.ok) {
+          const btcDomData = await btcDomRes.json();
+          if (btcDomData && btcDomData.markPrice) currentBtcDom = parseFloat(btcDomData.markPrice) / 100; // Giá 5500 => 55.00%
         }
 
         const closesLTF = klinesLTF.map(d => parseFloat(d[4]));
@@ -271,6 +272,7 @@ export default function AntiFragileTerminal() {
         const lowsLTF = klinesLTF.map(d => parseFloat(d[3]));
         const volumesLTF = klinesLTF.map(d => parseFloat(d[5]));
         const currentPrice = closesLTF[closesLTF.length - 1] || 0;
+        const currentVol = volumesLTF[volumesLTF.length - 1] || 0;
 
         const closesHTF = klinesHTF.map(d => parseFloat(d[4]));
         const htfSma200 = QuantMath.sma(closesHTF, 200);
@@ -279,31 +281,61 @@ export default function AntiFragileTerminal() {
         const oiEma14 = QuantMath.ema(oiValues, 14) || oiValues[oiValues.length - 1] || 0;
         const currentOiValue = parseFloat(oiCurrent?.openInterest || 0) * currentPrice;
 
+        // Tính toán các chỉ báo
         const atr14 = QuantMath.atr(highsLTF, lowsLTF, closesLTF, 14);
+        const atr3 = QuantMath.atr(highsLTF.slice(-10), lowsLTF.slice(-10), closesLTF.slice(-10), 3); // Lấy 10 nến cuối tính ATR 3
         const adxValue = QuantMath.adx(highsLTF, lowsLTF, closesLTF, 14);
         const sma200 = QuantMath.sma(closesLTF, 200); 
         const ema34 = QuantMath.ema(closesLTF, 34); 
         const ema89 = QuantMath.ema(closesLTF, 89); 
         const rsiValue = QuantMath.rsi(closesLTF, 14);
-        const bollinger = QuantMath.bollinger(closesLTF, 20);
+        
+        // Bollinger chuẩn (2.0) để hiển thị, Bollinger Fat-Tail (2.5) để kiểm duyệt
+        const bollinger20 = QuantMath.bollinger(closesLTF, 20, 2.0);
+        const bollingerFatTail = QuantMath.bollinger(closesLTF, 20, 2.5);
         const obvValue = QuantMath.obv(closesLTF, volumesLTF);
+        const volSma20 = QuantMath.sma(volumesLTF.slice(-21, -1), 20); // Tránh cây nến hiện tại đang chạy
+
+        // ====================================================
+        // 2. THUẬT TOÁN TÍNH TOXIC FLOW (Chấm dứt việc nhập tay)
+        // ====================================================
+        const isOiSpiking = currentOiValue > oiEma14;
+        const isVolSpiking = currentVol > volSma20 * 1.5;
+        const isTakerAggressive = currentTaker > 1.2 || currentTaker < 0.8;
+        
+        let toxicScore = 0;
+        if (isOiSpiking) toxicScore++;
+        if (isVolSpiking) toxicScore++;
+        if (isTakerAggressive) toxicScore++;
+        const calcToxicFlow = toxicScore >= 3 ? 'EXTREME' : toxicScore === 2 ? 'HIGH' : 'LOW';
+
+        // ====================================================
+        // 3. THUẬT TOÁN TÍNH FAT-TAIL RISK (Biến động cực đoan)
+        // ====================================================
+        // Nếu Giá đâm thủng dải 2.5 SD, HOẶC ATR ngắn hạn phình to 1.5 lần ATR dài hạn
+        const isTailBreach = currentPrice > bollingerFatTail.upper || currentPrice < bollingerFatTail.lower;
+        const isAtrExploding = atr3 > (atr14 * 1.5);
+        const calcVolSkew = (isTailBreach || isAtrExploding) ? 'FAT_TAIL' : 'NORMAL';
 
         setAutoData({
           currentPrice, atr14, atrPercent: currentPrice > 0 ? (atr14 / currentPrice) * 100 : 0, 
           adx: adxValue, sma200, ema34, ema89, htfSma200,
           fundingRate: (funding && funding[0]) ? parseFloat(funding[0].fundingRate) * 100 : 0,
-          currentOi: currentOiValue, oiEma: oiEma14, isOiSpiking: currentOiValue > oiEma14,
-          rsi: rsiValue, bbw: bollinger.bbw, obv: obvValue
+          currentOi: currentOiValue, oiEma: oiEma14, isOiSpiking,
+          rsi: rsiValue, bbw: bollinger20.bbw, obv: obvValue
         });
 
         if(tradeSetup.entry === 0) setTradeSetup(prev => ({ ...prev, entry: currentPrice }));
         
-        // Gán vào Macro State (Không còn tự sinh ma)
-        setMacroData(prev => ({ 
+        // Gán 100% dữ liệu API vào state apiMacro
+        setApiMacro(prev => ({ 
           ...prev, 
           fgiValue: fetchedFgi,
           longShortRatio: currentLsr, 
-          takerBuySellRatio: currentTaker
+          takerBuySellRatio: currentTaker,
+          btcDominance: currentBtcDom,
+          toxicFlow: calcToxicFlow,
+          volatilitySkew: calcVolSkew
         }));
 
         setSystemError(false); 
@@ -333,8 +365,8 @@ export default function AntiFragileTerminal() {
     const riskDiff = Math.abs(tradeSetup.entry - tradeSetup.slTech);
     const rewardDiff = Math.abs(tradeSetup.tpTech - tradeSetup.entry);
     
-    // TÍNH TOÁN COST DRAG VỚI SPREAD CỦA ALTCOIN
-    const costDragPerCoin = QuantMath.costDrag(tradeSetup.entry, tradeSetup.tradeType, tradeSetup.execution, autoData.fundingRate / 100, macroData.bidAskSpread);
+    // TÍNH TOÁN COST DRAG (Dùng Bid-Ask từ bảng Manual)
+    const costDragPerCoin = QuantMath.costDrag(tradeSetup.entry, tradeSetup.tradeType, tradeSetup.execution, autoData.fundingRate / 100, manualData.bidAskSpread);
     
     let theoreticalRR = riskDiff > 0 ? ((rewardDiff - costDragPerCoin) / (riskDiff + costDragPerCoin)) : 0;
     if (!isFinite(theoreticalRR) || isNaN(theoreticalRR) || theoreticalRR < 0) theoreticalRR = 0;
@@ -343,7 +375,7 @@ export default function AntiFragileTerminal() {
     let slPercent = totalSlDistance / tradeSetup.entry;
     if (!isFinite(slPercent) || isNaN(slPercent) || slPercent === 0) slPercent = 0.01;
 
-    const capitalSafe = macroData.capital > 0 ? macroData.capital : 10000;
+    const capitalSafe = manualData.capital > 0 ? manualData.capital : 10000;
     const riskAmountUSD = capitalSafe * (tradeSetup.riskPercent / 100);
     let positionSizeUSD = riskAmountUSD / slPercent;
     if (!isFinite(positionSizeUSD) || isNaN(positionSizeUSD)) positionSizeUSD = 0;
@@ -353,12 +385,11 @@ export default function AntiFragileTerminal() {
     let effectiveLeverage = tradeSetup.tradeType === 'SPOT' ? 1.0 : (positionSizeUSD / capitalSafe);
     if (!isFinite(effectiveLeverage) || isNaN(effectiveLeverage)) effectiveLeverage = 0;
     
-    // ÉP ĐÒN BẨY: Fat-Tail Risk hoặc Cuối tuần (Cointegration Breakdown) -> Giảm Margin
+    // ÉP ĐÒN BẨY THEO BIẾN FAT-TAIL AUTO
     let maxLeverage = symbol === 'BTCUSDT' || symbol === 'ETHUSDT' ? 5 : 3;
-    if (macroData.volatilitySkew === 'FAT_TAIL' || macroData.isWeekend) maxLeverage = 1.5; 
+    if (apiMacro.volatilitySkew === 'FAT_TAIL' || apiMacro.isWeekend) maxLeverage = 1.5; 
 
     const isLeverageSafe = tradeSetup.tradeType === 'SPOT' ? true : effectiveLeverage <= maxLeverage;
-
     const kellyDec = QuantMath.kellyCriterion(tradeStats.winRate, tradeStats.historicalRR);
     const kellyPct = tradeStats.hasEnoughData ? (kellyDec * 100) : 0;
 
@@ -367,14 +398,14 @@ export default function AntiFragileTerminal() {
       effectiveLeverage: effectiveLeverage.toFixed(2), isLeverageSafe, theoreticalRR: theoreticalRR.toFixed(2), maxLeverage, costDragUSD: totalCostDragUSD.toFixed(2),
       kellyPct: kellyPct.toFixed(2)
     };
-  }, [autoData, macroData, tradeSetup, symbol, tradeStats]);
+  }, [autoData, apiMacro, manualData, tradeSetup, symbol, tradeStats]);
 
   const handleMasterAuto = () => {
     if (!autoData || !mathCore) return;
     let suggestedType = 'FUTURES';
     let suggestedDirection = autoData.currentPrice > autoData.ema34 ? 'LONG' : 'SHORT'; 
     
-    if (autoData.rsi < 30 && macroData.fgiValue < 20 && intervalTime === '1d') {
+    if (autoData.rsi < 30 && apiMacro.fgiValue < 20 && intervalTime === '1d') {
       suggestedType = 'SPOT'; suggestedDirection = 'LONG';
     }
 
@@ -397,14 +428,13 @@ export default function AntiFragileTerminal() {
     if (!autoData || !mathCore) return { hardGates: [], softGates: [], softCount: 0, isApproved: false };
     
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;
-    const isLsrExtreme = macroData.longShortRatio > 2.5 || macroData.longShortRatio < 0.4;
+    const isLsrExtreme = apiMacro.longShortRatio > 2.5 || apiMacro.longShortRatio < 0.4;
     const isPsychoTrap = (isFundingExtreme && autoData.isOiSpiking) || isLsrExtreme;
     const isSqueeze = autoData.bbw < 5 && autoData.adx < 20; 
     
-    // Nếu Euphoria trên Social nhưng Cá mập Taker xả hàng -> Bẫy phân kỳ
-    const isSocialTrap = macroData.socialSentiment === 'EUPHORIA' && macroData.takerBuySellRatio < 1;
-    // Bẫy cuối tuần thanh khoản mỏng
-    const isWeekendTrap = macroData.isWeekend && tradeSetup.tradeType === 'FUTURES' && mathCore.effectiveLeverage > 2;
+    // Đám đông fomo nhưng API báo Taker Volume xả hàng
+    const isSocialTrap = manualData.socialSentiment === 'EUPHORIA' && apiMacro.takerBuySellRatio < 1;
+    const isWeekendTrap = apiMacro.isWeekend && tradeSetup.tradeType === 'FUTURES' && mathCore.effectiveLeverage > 2;
 
     const hardGates = [
       { id: 'h1', passed: tradeSetup.execution === 'LIMIT', text: "EXECUTION: Limit Order (Không đốt tài khoản vào Spread/Slippage)" },
@@ -417,8 +447,8 @@ export default function AntiFragileTerminal() {
 
     const softGates = [
       { id: 's1', passed: autoData.adx > 25 || isSqueeze, text: `REGIME: Có xu hướng (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%)` },
-      { id: 's2', passed: !isSocialTrap, text: `SOCIAL: Dòng tiền Social (${macroData.socialSentiment}) đồng thuận với Taker Volume.` },
-      { id: 's3', passed: !isPsychoTrap && macroData.toxicFlow !== 'EXTREME' && !isWeekendTrap, text: `MICROSTRUCTURE: Thanh khoản an toàn, Không kẹt bẫy Cuối tuần.` },
+      { id: 's2', passed: !isSocialTrap, text: `SOCIAL: Dòng tiền Social (${manualData.socialSentiment}) đồng thuận với Taker Volume.` },
+      { id: 's3', passed: !isPsychoTrap && apiMacro.toxicFlow !== 'EXTREME' && !isWeekendTrap, text: `MICROSTRUCTURE: Thanh khoản an toàn, Không kẹt bẫy Toxic Flow.` },
       { id: 's4', passed: tradeSetup.passedSFP, text: "PRICE ACTION: Có SFP (Đã quét Stop-hunt)." }
     ];
 
@@ -427,20 +457,14 @@ export default function AntiFragileTerminal() {
     const isApproved = hardPassed && softCount >= 3 && !systemError;
 
     return { hardGates, softGates, softCount, isApproved };
-  }, [autoData, mathCore, tradeSetup, macroData, tradeStats, systemError]);
+  }, [autoData, mathCore, tradeSetup, apiMacro, manualData, tradeStats, systemError]);
 
-  // ==========================================
-  // 🧠 GEMINI V1BETA: INSTITUTIONAL QUANT MANAGER
-  // ==========================================
   const runGeminiAnalysis = async () => {
     if (geminiCooldown > 0) return;
     if (!autoData || !mathCore) return;
     
     const apiKey = geminiApiKey; 
-    if (!apiKey) {
-      setAiAnalysis('⚠️ LỖI: Chưa cấu hình VITE_GEMINI_API_KEY trên Netlify.');
-      return;
-    }
+    if (!apiKey) { setAiAnalysis('⚠️ LỖI: Chưa cấu hình VITE_GEMINI_API_KEY trên Netlify.'); return; }
 
     setIsAnalyzing(true);
     setAiAnalysis('');
@@ -451,45 +475,37 @@ export default function AntiFragileTerminal() {
         : `Trader mới, dữ liệu quá mỏng (< 10 lệnh), cẩn thận Overfitting.`;
 
       const prompt = `
-        Giao thức "ANTI-FRAGILE V4.4 - INSTITUTIONAL QUANT MANAGER".
-        Vai trò: Giám đốc Quản trị Rủi ro (Hedge Fund). Phân tích cấu trúc vi mô, rủi ro phân phối đuôi béo (Fat-tail), tương quan vĩ mô và ma sát thị trường.
+        Giao thức "ANTI-FRAGILE V4.5 - INSTITUTIONAL QUANT MANAGER".
+        Vai trò: Giám đốc Quản trị Rủi ro (Hedge Fund). Phân tích cấu trúc vi mô, rủi ro phân phối đuôi béo (Fat-tail).
         
         LỊCH SỬ GIAO DỊCH SUPABASE: ${winRateContext}
 
-        VĨ MÔ & TÂM LÝ XÃ HỘI (${symbol} - ${intervalTime}):
-        - Biến động: Fat-Tail Risk = ${macroData.volatilitySkew} | Cuối tuần (Cointegration Risk) = ${macroData.isWeekend ? 'Có' : 'Không'}
-        - Tâm lý Mạng xã hội: ${macroData.socialSentiment} | Toxic Flow (VPIN): ${macroData.toxicFlow}
-        - L/S Ratio: ${macroData.longShortRatio.toFixed(2)} | Taker Buy/Sell (Dòng tiền chủ động): ${macroData.takerBuySellRatio.toFixed(2)}
+        VĨ MÔ API THỰC CHỨNG (${symbol} - ${intervalTime}):
+        - Biến động: Fat-Tail Risk = ${apiMacro.volatilitySkew} | Cuối tuần = ${apiMacro.isWeekend ? 'Có' : 'Không'}
+        - VPIN (Toxic Flow Auto): ${apiMacro.toxicFlow} | BTC Dominance: ${apiMacro.btcDominance.toFixed(2)}%
+        - L/S Ratio: ${apiMacro.longShortRatio.toFixed(2)} | Taker Buy/Sell (Dòng tiền chủ động): ${apiMacro.takerBuySellRatio.toFixed(2)}
+        - Nhận định đám đông (Manual): ${manualData.socialSentiment}
         
         THÔNG SỐ VỊ THẾ BẮT BUỘC (RISK METRICS):
         - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction} | Loại lệnh: ${tradeSetup.execution}.
-        - Margin hiệu dụng: ${mathCore.effectiveLeverage}x (Giới hạn tối đa: ${mathCore.maxLeverage}x).
-        - Chi phí ma sát (Spread+Slippage+Fee): $${mathCore.costDragUSD} (Sẽ bị trừ thẳng vào lợi nhuận).
+        - Margin hiệu dụng: ${mathCore.effectiveLeverage}x (Max: ${mathCore.maxLeverage}x).
+        - Chi phí ma sát (Spread+Slippage+Fee): $${mathCore.costDragUSD}.
         - Kelly (Lịch sử): ${tradeStats.hasEnoughData ? mathCore.kellyPct + '%' : 'N/A'}.
 
         Yêu cầu phản biện khắc nghiệt:
-        1. Trader có đang Overfitting (chỉ nhìn quá khứ mà bỏ qua bẫy thanh khoản Cuối tuần/Toxic Flow hiện tại)?
-        2. So sánh Social Sentiment (Đám đông) và Taker Volume (Cá voi), lệnh này có rủi ro đu đỉnh/đáy không?
-        3. Với Cost Drag $${mathCore.costDragUSD} và đòn bẩy ${mathCore.effectiveLeverage}x, Kelly có xác nhận đây là lệnh sinh lời dài hạn không?
+        1. Đánh giá sự đồng thuận giữa Taker Buy/Sell và nhận định Social. Đám đông đang đúng hay đang làm exit liquidity?
+        2. Dựa vào Toxic Flow và Volatility Skew, đòn bẩy và Cost Drag hiện tại có ăn mòn hết lợi nhuận không?
+        3. Kết luận Toán học: Lệnh này có kỳ vọng dương dài hạn không?
         Trả lời sắc bén, chuyên môn, đúng 4 câu tiếng Việt. Không dùng định dạng markdown rườm rà.
       `;
 
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify({ 
-          model: "gemini-3.5-flash",
-          input: prompt 
-        })
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({ model: "gemini-3.5-flash", input: prompt })
       });
 
-      if (!response.ok) {
-        if (response.status === 429) throw new Error('RATE_LIMIT');
-        throw new Error('API_ERROR');
-      }
+      if (!response.ok) { if (response.status === 429) throw new Error('RATE_LIMIT'); throw new Error('API_ERROR'); }
       
       const data = await response.json();
       const outputStep = data.steps?.find(step => step.type === 'model_output');
@@ -499,7 +515,7 @@ export default function AntiFragileTerminal() {
       setGeminiCooldown(15); 
     } catch (error) {
       console.error(error);
-      setAiAnalysis(error.message === 'RATE_LIMIT' ? '❌ Lỗi 429: Rate Limit (Quá tải). Chờ 30s.' : '❌ Lỗi kết nối Gemini API.');
+      setAiAnalysis(error.message === 'RATE_LIMIT' ? '❌ Lỗi 429: Rate Limit. Chờ 30s.' : '❌ Lỗi kết nối Gemini API.');
       setGeminiCooldown(30); 
     }
     setIsAnalyzing(false);
@@ -513,11 +529,11 @@ export default function AntiFragileTerminal() {
         entry: parseFloat(tradeSetup.entry), sl: parseFloat(tradeSetup.slTech), tp: parseFloat(tradeSetup.tpTech),
         risk_amount_usd: parseFloat(mathCore.riskAmountUSD), rr: parseFloat(mathCore.theoreticalRR),
         adx: autoData.adx, atr: autoData.atr14, funding_rate: autoData.fundingRate,
-        oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(macroData.fgiValue),
+        oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(apiMacro.fgiValue),
         trend_sma200: (autoData.currentPrice > autoData.sma200) ? 'ABOVE' : 'BELOW',
-        mvrv: parseFloat(macroData.mvrvZScore), 
-        liquidations: macroData.toxicFlow, 
-        news_trap: Boolean(macroData.isWeekend), // Lưu log lệnh có đánh cuối tuần hay không
+        mvrv: parseFloat(manualData.mvrvZScore), 
+        liquidations: apiMacro.toxicFlow, 
+        news_trap: Boolean(apiMacro.isWeekend), 
         leverage: parseFloat(mathCore.effectiveLeverage),
         status: 'OPEN', pnl_usd: 0
       };
@@ -537,8 +553,7 @@ export default function AntiFragileTerminal() {
        if (direction === 'LONG') pnl = (currentPx - entry) * positionCoins;
        else pnl = (entry - currentPx) * positionCoins;
        
-       // Trừ Cost Drag khi đóng lệnh bằng tay (Giả định đóng Limit)
-       const closeCost = QuantMath.costDrag(currentPx, 'FUTURES', 'LIMIT', autoData.fundingRate/100, macroData.bidAskSpread, 1);
+       const closeCost = QuantMath.costDrag(currentPx, 'FUTURES', 'LIMIT', autoData.fundingRate/100, manualData.bidAskSpread, 1);
        pnl = pnl - (closeCost * positionCoins / currentPx);
     }
     try {
@@ -565,11 +580,11 @@ export default function AntiFragileTerminal() {
       <div className="max-w-7xl mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-slate-800/80 pb-5">
         <div>
           <h1 className="text-xl md:text-2xl font-black text-emerald-500 flex items-center gap-2 tracking-tighter">
-            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V4.4 (Inst. Macro)</span>
+            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V4.5 (Data-Driven)</span>
           </h1>
           <p className="text-slate-500 text-[10px] mt-1 uppercase tracking-widest flex items-center gap-2">
             {lastUpdated ? `Sync: ${lastUpdated.toLocaleTimeString()}` : 'Khởi động Core...'}
-            {macroData.isWeekend && <span className="text-amber-500 border border-amber-900/50 bg-amber-900/10 px-1.5 rounded">CẢNH BÁO CUỐI TUẦN</span>}
+            {apiMacro.isWeekend && <span className="text-amber-500 border border-amber-900/50 bg-amber-900/10 px-1.5 rounded">CẢNH BÁO CUỐI TUẦN</span>}
             {tradeStats.hasEnoughData && (
                <span className="text-purple-400 border border-purple-900/50 bg-purple-900/10 px-1.5 rounded">
                  WR: {(tradeStats.winRate * 100).toFixed(1)}% | Avg R:R: {tradeStats.historicalRR.toFixed(2)}
@@ -601,61 +616,45 @@ export default function AntiFragileTerminal() {
         {/* CỘT TRÁI */}
         <div className="lg:col-span-7 space-y-6">
           
-          {/* ĐỘNG LỰC HỌC VĨ MÔ & TÂM LÝ XÃ HỘI */}
-          <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 shadow-xl">
-            <h2 className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-2 mb-4">
-              <Database className="w-3 h-3 text-purple-400" /> TÂM LÝ ĐÁM ĐÔNG & DÒNG TIỀN (MANUAL + API)
+          {/* ZONE 1: API DATA ALERTS (CẤM CHẠM) */}
+          <div className="bg-[#111116] border border-blue-900/30 rounded-xl p-4 shadow-xl">
+            <h2 className="text-[10px] font-bold text-blue-400 uppercase flex items-center gap-2 mb-4">
+              <Database className="w-3 h-3 text-blue-400" /> THỰC CHỨNG MICROSTRUCTURE (LIVE API)
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
+                <div className="bg-black/50 p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">GLOBAL L/S RATIO</label>
-                  <div className={`font-bold text-sm mt-1 ${macroData.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
-                    {macroData.longShortRatio.toFixed(2)}
+                  <div className={`font-bold text-sm mt-1 ${apiMacro.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
+                    {apiMacro.longShortRatio.toFixed(2)}
                   </div>
                 </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
+                <div className="bg-black/50 p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">TAKER BUY/SELL</label>
-                  <div className={`font-bold text-sm mt-1 ${macroData.takerBuySellRatio > 1 ? 'text-emerald-500' : 'text-red-500'}`}>
-                    {macroData.takerBuySellRatio.toFixed(2)}
+                  <div className={`font-bold text-sm mt-1 ${apiMacro.takerBuySellRatio > 1 ? 'text-emerald-500' : 'text-red-500'}`}>
+                    {apiMacro.takerBuySellRatio.toFixed(2)}
                   </div>
                 </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
-                  <label className="text-[8px] text-slate-500 block mb-1">FEAR & GREED (API)</label>
-                  <div className="font-bold text-sm text-orange-400 mt-1">{macroData.fgiValue}</div>
+                <div className="bg-black/50 p-2 rounded border border-slate-800">
+                  <label className="text-[8px] text-slate-500 block mb-1">BTC DOMINANCE</label>
+                  <div className="font-bold text-sm text-yellow-500 mt-1">{apiMacro.btcDominance.toFixed(2)}%</div>
                 </div>
-                
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-cyan-500/50">
-                  <label className="text-[8px] font-bold text-cyan-500 block mb-1 flex gap-1 items-center">SOCIAL SENTIMENT</label>
-                  <select value={macroData.socialSentiment} onChange={e => setMacroData({...macroData, socialSentiment: e.target.value})} className="w-full bg-transparent text-cyan-400 font-bold outline-none text-[10px] cursor-pointer mt-1">
-                    <option value="NEUTRAL">Trung lập</option>
-                    <option value="BEARISH">Tuyệt vọng (Đáy)</option>
-                    <option value="EUPHORIA">Hưng phấn (Đỉnh)</option>
-                  </select>
+                <div className="bg-black/50 p-2 rounded border border-slate-800">
+                  <label className="text-[8px] text-slate-500 block mb-1">FEAR & GREED</label>
+                  <div className="font-bold text-sm text-orange-400 mt-1">{apiMacro.fgiValue}</div>
                 </div>
 
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-purple-500/50">
-                  <label className="text-[8px] font-bold text-purple-500 block mb-1 flex gap-1 items-center">FAT-TAIL RISK</label>
-                  <select value={macroData.volatilitySkew} onChange={e => setMacroData({...macroData, volatilitySkew: e.target.value})} className="w-full bg-transparent text-purple-400 font-bold outline-none text-[10px] cursor-pointer mt-1">
-                    <option value="NORMAL">Phân phối chuẩn</option>
-                    <option value="FAT_TAIL">Đuôi béo (Nguy hiểm)</option>
-                  </select>
+                {/* Các biến đã được chuyển sang Auto Calculation */}
+                <div className="bg-black/50 p-2 rounded border border-purple-900/50">
+                  <label className="text-[8px] text-purple-500 block mb-1">FAT-TAIL (BB 2.5SD/ATR)</label>
+                  <div className={`font-bold text-[11px] mt-1 ${apiMacro.volatilitySkew === 'FAT_TAIL' ? 'text-purple-400 animate-pulse' : 'text-slate-400'}`}>
+                    {apiMacro.volatilitySkew}
+                  </div>
                 </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-red-500/50">
-                  <label className="text-[8px] font-bold text-red-500 block mb-1 flex gap-1 items-center"><Key className="w-2.5 h-2.5"/> TOXIC FLOW</label>
-                  <select value={macroData.toxicFlow} onChange={e => setMacroData({...macroData, toxicFlow: e.target.value})} className="w-full bg-transparent text-red-400 font-bold outline-none text-xs cursor-pointer mt-1.5">
-                    <option value="LOW">Thấp</option>
-                    <option value="HIGH">Cao</option>
-                    <option value="EXTREME">Cực đoan</option>
-                  </select>
-                </div>
-
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-amber-500/50">
-                  <label className="text-[8px] text-slate-500 block mb-1">SPREAD CỦA COIN (%)</label>
-                  <input type="number" step="0.01" value={macroData.bidAskSpread} onChange={e => setMacroData({...macroData, bidAskSpread: Number(e.target.value)})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-sm"/>
-                </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-emerald-500/50">
-                  <label className="text-[8px] text-slate-500 block mb-1">VỐN TỔNG (USD)</label>
-                  <input type="number" value={macroData.capital} onChange={e => setMacroData({...macroData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-bold outline-none text-sm"/>
+                <div className="bg-black/50 p-2 rounded border border-red-900/50">
+                  <label className="text-[8px] text-red-500 block mb-1 flex items-center gap-1"><Key className="w-2 h-2"/> TOXIC FLOW (VPIN)</label>
+                  <div className={`font-bold text-[11px] mt-1 ${apiMacro.toxicFlow === 'EXTREME' ? 'text-red-500' : apiMacro.toxicFlow === 'HIGH' ? 'text-orange-400' : 'text-emerald-500'}`}>
+                    {apiMacro.toxicFlow}
+                  </div>
                 </div>
             </div>
             
@@ -665,6 +664,35 @@ export default function AntiFragileTerminal() {
                <div><span className="block text-[8px] text-slate-500">BBW SQUEEZE</span><span className={`text-[10px] font-bold ${autoData?.bbw < 5 ? 'text-amber-400' : 'text-slate-300'}`}>{autoData?.bbw.toFixed(2) || '0.00'}%</span></div>
                <div><span className="block text-[8px] text-slate-500">HTF D1 TREND</span><span className={`text-[10px] font-bold ${autoData?.currentPrice > autoData?.htfSma200 ? 'text-emerald-500' : 'text-red-500'}`}>{autoData?.currentPrice > autoData?.htfSma200 ? 'BULL' : 'BEAR'}</span></div>
             </div>
+          </div>
+
+          {/* ZONE 2: BẢNG NHẬP TAY (MANUAL OVERRIDE TABLE) */}
+          <div className="bg-[#111116] border border-amber-900/30 rounded-xl p-4 shadow-xl">
+             <h2 className="text-[10px] font-bold text-amber-500 uppercase flex items-center gap-2 mb-4">
+               <Settings2 className="w-3 h-3 text-amber-500" /> BẢNG GHI ĐÈ THỦ CÔNG (MANUAL OVERRIDES)
+             </h2>
+             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-cyan-500/50">
+                  <label className="text-[8px] font-bold text-cyan-500 block mb-1">SOCIAL SENTIMENT</label>
+                  <select value={manualData.socialSentiment} onChange={e => setManualData({...manualData, socialSentiment: e.target.value})} className="w-full bg-transparent text-cyan-400 font-bold outline-none text-[10px] cursor-pointer mt-1">
+                    <option value="NEUTRAL">Trung lập</option>
+                    <option value="BEARISH">Tuyệt vọng (Đáy)</option>
+                    <option value="EUPHORIA">Hưng phấn (Đỉnh)</option>
+                  </select>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-amber-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">SPREAD CỦA COIN (%)</label>
+                  <input type="number" step="0.01" value={manualData.bidAskSpread} onChange={e => setManualData({...manualData, bidAskSpread: Number(e.target.value)})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-sm"/>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-pink-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">MVRV Z-SCORE</label>
+                  <input type="number" step="0.1" value={manualData.mvrvZScore} onChange={e => setManualData({...manualData, mvrvZScore: Number(e.target.value)})} className="w-full bg-transparent text-pink-400 font-bold outline-none text-sm"/>
+                </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-emerald-500/50">
+                  <label className="text-[8px] text-slate-500 block mb-1">VỐN TỔNG (USD)</label>
+                  <input type="number" value={manualData.capital} onChange={e => setManualData({...manualData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-bold outline-none text-sm"/>
+                </div>
+             </div>
           </div>
 
           {/* VÙNG THIẾT LẬP LỆNH */}
@@ -749,38 +777,6 @@ export default function AntiFragileTerminal() {
              </div>
           </div>
 
-          {/* SỔ TAY GHI CHÉP GIAO DỊCH */}
-          <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 overflow-hidden shadow-xl">
-            <h2 className="text-[10px] font-bold text-slate-400 uppercase mb-3 flex items-center gap-2"><History className="w-3 h-3 text-emerald-400" /> SỔ TAY GIAO DỊCH (SUPABASE DB)</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-[9px] text-slate-400">
-                <thead className="bg-slate-900 text-slate-500">
-                  <tr><th className="p-2 rounded-tl">Mã/Loại</th><th className="p-2">Hướng</th><th className="p-2">Giá Entry / Cắt lỗ</th><th className="p-2">Mất($) / Ăn(R)</th><th className="p-2">Status</th><th className="p-2 rounded-tr text-right">PnL/Hành động</th></tr>
-                </thead>
-                <tbody>
-                  {tradeLogs.length === 0 ? <tr><td colSpan="6" className="p-6 text-center border-b border-slate-800 text-slate-600">DB đang trống...</td></tr> :
-                    tradeLogs.slice(0, 8).map(log => (
-                      <tr key={log.id} className="border-b border-slate-800/50 hover:bg-slate-900/40 transition-colors">
-                        <td className="p-2 text-white font-bold">{log.symbol} <span className="text-slate-600 text-[8px] ml-1">{log.type}</span></td>
-                        <td className={`p-2 font-black ${log.direction==='LONG'?'text-emerald-500':'text-red-500'}`}>{log.direction}</td>
-                        <td className="p-2 font-mono">{log.entry} / <span className="text-red-400">{log.sl}</span></td>
-                        <td className="p-2 font-mono">${log.risk_amount_usd} <span className="text-slate-600">|</span> 1:{log.rr}</td>
-                        <td className="p-2 font-bold">{log.status === 'OPEN' ? <span className="text-blue-400 animate-pulse drop-shadow-[0_0_5px_rgba(96,165,250,0.5)]">OPEN</span> : <span className="text-slate-500">{log.status}</span>}</td>
-                        <td className="p-2 text-right">
-                          {log.status === 'OPEN' ? (
-                            <button onClick={() => handleManualClose(log.id, log.direction, log.entry, log.sl, log.risk_amount_usd)} className="bg-slate-800 text-slate-300 px-3 py-1 rounded text-[8px] font-bold border border-slate-700 hover:bg-slate-700 hover:text-white transition-colors uppercase">Chốt Lời/Lỗ</button>
-                          ) : (
-                            <span className={`font-mono font-bold ${log.pnl_usd > 0 ? 'text-emerald-500' : 'text-red-500'}`}>{log.pnl_usd > 0 ? '+' : ''}{log.pnl_usd?.toFixed(2)}$</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  }
-                </tbody>
-              </table>
-            </div>
-          </div>
-
         </div>
 
         {/* CỘT PHẢI: BỘ LỌC KIỂM DUYỆT CHỐNG RỦI RO */}
@@ -803,7 +799,7 @@ export default function AntiFragileTerminal() {
           </div>
 
           <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 flex-grow flex flex-col shadow-xl">
-             <h2 className="text-[10px] font-bold text-slate-300 uppercase mb-4 flex items-center gap-2 border-b border-slate-800 pb-3"><ShieldAlert className="w-4 h-4 text-emerald-500" /> BỘ LỌC KIỂM DUYỆT V4.4 (Hard/Soft Gates)</h2>
+             <h2 className="text-[10px] font-bold text-slate-300 uppercase mb-4 flex items-center gap-2 border-b border-slate-800 pb-3"><ShieldAlert className="w-4 h-4 text-emerald-500" /> BỘ LỌC KIỂM DUYỆT V4.5 (Hard/Soft Gates)</h2>
              
              {/* BƯỚC CHECK TAY (Human Override) */}
              <div className="mb-4 space-y-2 bg-[#0a0a0c] p-3 rounded-lg border border-slate-800">

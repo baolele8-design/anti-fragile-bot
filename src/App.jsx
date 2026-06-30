@@ -393,7 +393,7 @@ export default function AntiFragileTerminal() {
     showToast("✅ Auto Setup: Tối ưu Rủi ro Đuôi béo.");
   };
 
-  const checklist = useMemo(() => {
+  const logicGates = useMemo(() => {
     if (!autoData || !mathCore) return { hardGates: [], softGates: [], softCount: 0, isApproved: false };
     
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3 } from 'lucide-react';
+import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3, Lock, Percent } from 'lucide-react';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
 // ==========================================
-// 1. SUPABASE & ENV SETUP (NETLIFY READY)
+// 1. SUPABASE & ENV SETUP
 // ==========================================
 const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL || ''; 
 const supabaseKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || ''; 
@@ -11,7 +11,7 @@ const geminiApiKey = import.meta.env?.VITE_GEMINI_API_KEY || '';
 
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// --- LÕI TOÁN HỌC ĐỊNH LƯỢNG (BỔ SUNG KELLY & EXPECTED VALUE) ---
+// --- LÕI TOÁN HỌC (THÊM SPREAD COST TỪ BÀI BÁO ALTCOIN SOCIAL MEDIA) ---
 const QuantMath = {
   sma: (data, period) => {
     if (!data || data.length < period) return 0;
@@ -102,19 +102,20 @@ const QuantMath = {
     }
     return obv;
   },
-  costDrag: (entryPrice, tradeType, execution, fundingRate, holdingDays = 1) => {
-    const slippage = execution === 'MARKET' ? 0.001 : 0;
+  // MA SÁT THỊ TRƯỜNG: Bổ sung Bid-Ask Spread cho Altcoin
+  costDrag: (entryPrice, tradeType, execution, fundingRate, spreadPercent, holdingDays = 1) => {
+    const slippage = execution === 'MARKET' ? 0.001 : 0; 
     const fee = execution === 'MARKET' ? 0.0004 : 0.0002;
+    const spreadCost = (spreadPercent / 100) / 2; // Nửa spread cho entry, nửa cho exit
     const fundingDrag = tradeType === 'FUTURES' ? (fundingRate * holdingDays) : 0;
-    return (slippage + fee * 2 + Math.abs(fundingDrag)) * entryPrice; 
+    return (slippage + fee + spreadCost) * 2 * entryPrice + Math.abs(fundingDrag * entryPrice); 
   },
-  // MỚI: Tính Tiêu chuẩn Kelly (Kelly Criterion) để xem R:R này có đáng đánh không dựa trên WinRate lịch sử
-  kellyCriterion: (winRate, rewardRiskRatio) => {
-    if(winRate === 0 || rewardRiskRatio === 0) return 0;
-    const W = winRate / 100;
-    const R = rewardRiskRatio;
+  kellyCriterion: (winRate, historicalAvgRR) => {
+    if(winRate === 0 || historicalAvgRR === 0) return 0;
+    const W = winRate;
+    const R = historicalAvgRR;
     const kelly = W - ((1 - W) / R);
-    return kelly > 0 ? (kelly * 100) : 0; // Trả về % vốn tối ưu, nếu < 0 nghĩa là hệ thống kỳ vọng âm
+    return kelly; 
   }
 };
 
@@ -125,7 +126,10 @@ export default function AntiFragileTerminal() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
   const [tradeLogs, setTradeLogs] = useState([]);
-  const [tradeStats, setTradeStats] = useState({ winRate: 0, totalClosed: 0, expectancy: 0 });
+  
+  const [tradeStats, setTradeStats] = useState({ 
+    totalClosed: 0, winRate: 0, avgWinR: 0, avgLossR: 1, historicalRR: 0, hasEnoughData: false 
+  });
   
   const [lastUpdated, setLastUpdated] = useState(null);
   const [systemError, setSystemError] = useState(false);
@@ -135,7 +139,7 @@ export default function AntiFragileTerminal() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [geminiCooldown, setGeminiCooldown] = useState(0);
 
-  // BỔ SUNG: Social Sentiment & Macro Correlation (Từ 5 bài báo mới)
+  // DỮ LIỆU VĨ MÔ & SENTIMENT (Kiểm soát "Thông số ma")
   const [macroData, setMacroData] = useState({
     capital: 10000,
     fgiValue: 50, 
@@ -144,10 +148,10 @@ export default function AntiFragileTerminal() {
     btcDominance: 55.0, 
     mvrvZScore: 1.2,    
     toxicFlow: 'LOW', 
-    socialSentiment: 'NEUTRAL', // Bullish/Bearish/Neutral từ Twitter/Social
-    macroCorrelation: 'HIGH', // Tương quan với Chứng khoán/SPX
-    volatilitySkew: 'NORMAL', // Rủi ro đuôi béo (Fat-tail)
-    newsTrap: false
+    socialSentiment: 'NEUTRAL', 
+    isWeekend: false, // Phá vỡ đồng liên kết Vĩ mô (Cointegration Breakdown)
+    volatilitySkew: 'NORMAL', 
+    bidAskSpread: 0.01 // Phí ẩn của Altcoin (Mặc định BTC là 0.01%)
   });
 
   const [tradeSetup, setTradeSetup] = useState({
@@ -162,25 +166,44 @@ export default function AntiFragileTerminal() {
     passedSFP: false 
   });
 
+  // Xác định Cuối tuần (Cointegration Breakdown Risk)
+  useEffect(() => {
+    const today = new Date().getDay();
+    setMacroData(prev => ({ ...prev, isWeekend: (today === 0 || today === 6) }));
+  }, []);
+
   useEffect(() => {
     if (geminiCooldown > 0) { const t = setTimeout(() => setGeminiCooldown(c => c - 1), 1000); return () => clearTimeout(t); }
   }, [geminiCooldown]);
 
-  // --- SUPABASE SYNC & TÍNH TOÁN THỐNG KÊ LỊCH SỬ ---
+  // --- SUPABASE SYNC (DỮ LIỆU LỊCH SỬ THẬT) ---
   useEffect(() => {
     if (!supabase) return;
     const fetchLogs = async () => {
       try {
-        const { data, error } = await supabase.from('trade_logs').select('*').order('created_at', { ascending: false }).limit(100);
+        const { data, error } = await supabase.from('trade_logs').select('*').order('created_at', { ascending: false }).limit(200);
         if (!error && data) {
           setTradeLogs(data);
-          
-          // Tính Win Rate và Số lệnh
-          const closedTrades = data.filter(d => d.status === 'WIN' || d.status === 'LOSS');
-          const wins = closedTrades.filter(d => d.status === 'WIN').length;
-          const winRate = closedTrades.length > 0 ? (wins / closedTrades.length) * 100 : 0;
-          
-          setTradeStats({ winRate: winRate, totalClosed: closedTrades.length });
+          const closedTrades = data.filter(d => (d.status === 'WIN' || d.status === 'LOSS') && d.symbol === symbol);
+          let totalWinR = 0; let winCount = 0;
+          let totalLossR = 0; let lossCount = 0;
+
+          closedTrades.forEach(t => {
+             const riskUsd = t.risk_amount_usd || 1;
+             const rMultiple = t.pnl_usd / riskUsd;
+             if (t.status === 'WIN') { totalWinR += rMultiple; winCount++; }
+             if (t.status === 'LOSS') { totalLossR += Math.abs(rMultiple); lossCount++; }
+          });
+
+          const winRate = closedTrades.length > 0 ? (winCount / closedTrades.length) : 0;
+          const avgWinR = winCount > 0 ? (totalWinR / winCount) : 0;
+          const avgLossR = lossCount > 0 ? (totalLossR / lossCount) : 1; 
+          const historicalRR = avgLossR > 0 ? (avgWinR / avgLossR) : 0;
+
+          setTradeStats({ 
+            totalClosed: closedTrades.length, winRate: winRate, avgWinR, avgLossR, historicalRR,
+            hasEnoughData: closedTrades.length >= 10 
+          });
         }
       } catch (err) { console.error(err); }
     };
@@ -188,13 +211,13 @@ export default function AntiFragileTerminal() {
 
     const subscription = supabase.channel('public:trade_logs')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'trade_logs' }, (payload) => {
-        if (payload.eventType === 'INSERT') setTradeLogs(current => [payload.new, ...current].slice(0, 100));
+        if (payload.eventType === 'INSERT') setTradeLogs(current => [payload.new, ...current].slice(0, 200));
         else if (payload.eventType === 'UPDATE') setTradeLogs(current => current.map(log => log.id === payload.new.id ? payload.new : log));
       }).subscribe();
     return () => supabase.removeChannel(subscription);
-  }, []);
+  }, [symbol]);
 
-  // --- FETCH DỮ LIỆU TỪ BINANCE (LTF + HTF 1D) ---
+  // --- FETCH DỮ LIỆU TỪ BINANCE & ALTERNATIVE (Sửa tận gốc Thông số ma) ---
   useEffect(() => {
     let isMounted = true;
     const fetchData = async () => {
@@ -202,14 +225,15 @@ export default function AntiFragileTerminal() {
       try {
         const oiInterval = ['15m', '1h', '4h', '1d'].includes(intervalTime) ? intervalTime : '1d';
         
-        const [klinesLTFRes, klinesHTFRes, fundingRes, oiCurrentRes, oiHistRes, lsrRes, takerRes] = await Promise.all([
+        const [klinesLTFRes, klinesHTFRes, fundingRes, oiCurrentRes, oiHistRes, lsrRes, takerRes, fgiRes] = await Promise.all([
           fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalTime}&limit=200`),
           fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=200`), 
           fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=1`),
           fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`),
           fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=${oiInterval}&limit=30`),
           fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
-          fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=${oiInterval}&limit=1`)
+          fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
+          fetch('https://api.alternative.me/fng/?limit=1')
         ]);
 
         if (!isMounted) return;
@@ -221,8 +245,9 @@ export default function AntiFragileTerminal() {
         const oiCurrent = await oiCurrentRes.json();
         const oiHist = await oiHistRes.json();
 
-        let currentLsr = 1.0;
-        let currentTaker = 1.0;
+        // Kéo chuẩn xác Sentiment Binance
+        let currentLsr = macroData.longShortRatio;
+        let currentTaker = macroData.takerBuySellRatio;
         if (lsrRes.ok) {
           const lsrData = await lsrRes.json();
           if (lsrData && lsrData.length > 0) currentLsr = parseFloat(lsrData[lsrData.length-1].longShortRatio);
@@ -230,6 +255,15 @@ export default function AntiFragileTerminal() {
         if (takerRes.ok) {
           const takerData = await takerRes.json();
           if (takerData && takerData.length > 0) currentTaker = parseFloat(takerData[takerData.length-1].buySellRatio);
+        }
+
+        // Kéo chuẩn xác FGI
+        let fetchedFgi = macroData.fgiValue;
+        if (fgiRes.ok) {
+          const fgiData = await fgiRes.json();
+          if (fgiData && fgiData.data && fgiData.data.length > 0) {
+            fetchedFgi = parseInt(fgiData.data[0].value);
+          }
         }
 
         const closesLTF = klinesLTF.map(d => parseFloat(d[4]));
@@ -264,8 +298,12 @@ export default function AntiFragileTerminal() {
 
         if(tradeSetup.entry === 0) setTradeSetup(prev => ({ ...prev, entry: currentPrice }));
         
+        // Gán vào Macro State (Không còn tự sinh ma)
         setMacroData(prev => ({ 
-          ...prev, longShortRatio: currentLsr, takerBuySellRatio: currentTaker
+          ...prev, 
+          fgiValue: fetchedFgi,
+          longShortRatio: currentLsr, 
+          takerBuySellRatio: currentTaker
         }));
 
         setSystemError(false); 
@@ -289,16 +327,17 @@ export default function AntiFragileTerminal() {
   };
 
   const mathCore = useMemo(() => {
-    const safeResult = { slPercent: "0.00", riskAmountUSD: "0.00", positionSizeUSD: "0.00", effectiveLeverage: "0.00", isLeverageSafe: false, calculatedRR: "0.00", maxLeverage: 1, costDragUSD: "0.00", kelly: 0 };
+    const safeResult = { slPercent: "0.00", riskAmountUSD: "0.00", positionSizeUSD: "0.00", effectiveLeverage: "0.00", isLeverageSafe: false, theoreticalRR: "0.00", maxLeverage: 1, costDragUSD: "0.00", kellyPct: 0 };
     if (!autoData || !tradeSetup.entry || tradeSetup.entry <= 0 || tradeSetup.slTech <= 0) return safeResult;
     
     const riskDiff = Math.abs(tradeSetup.entry - tradeSetup.slTech);
     const rewardDiff = Math.abs(tradeSetup.tpTech - tradeSetup.entry);
     
-    const costDragPerCoin = QuantMath.costDrag(tradeSetup.entry, tradeSetup.tradeType, tradeSetup.execution, autoData.fundingRate / 100, 1);
+    // TÍNH TOÁN COST DRAG VỚI SPREAD CỦA ALTCOIN
+    const costDragPerCoin = QuantMath.costDrag(tradeSetup.entry, tradeSetup.tradeType, tradeSetup.execution, autoData.fundingRate / 100, macroData.bidAskSpread);
     
-    let calculatedRR = riskDiff > 0 ? ((rewardDiff - costDragPerCoin) / (riskDiff + costDragPerCoin)) : 0;
-    if (!isFinite(calculatedRR) || isNaN(calculatedRR) || calculatedRR < 0) calculatedRR = 0;
+    let theoreticalRR = riskDiff > 0 ? ((rewardDiff - costDragPerCoin) / (riskDiff + costDragPerCoin)) : 0;
+    if (!isFinite(theoreticalRR) || isNaN(theoreticalRR) || theoreticalRR < 0) theoreticalRR = 0;
 
     const totalSlDistance = riskDiff + (1.2 * autoData.atr14);
     let slPercent = totalSlDistance / tradeSetup.entry;
@@ -314,21 +353,19 @@ export default function AntiFragileTerminal() {
     let effectiveLeverage = tradeSetup.tradeType === 'SPOT' ? 1.0 : (positionSizeUSD / capitalSafe);
     if (!isFinite(effectiveLeverage) || isNaN(effectiveLeverage)) effectiveLeverage = 0;
     
-    // ĐIỀU CHỈNH FAT-TAIL RISK: Rủi ro đuôi béo cao -> Giảm ngay đòn bẩy tối đa
+    // ÉP ĐÒN BẨY: Fat-Tail Risk hoặc Cuối tuần (Cointegration Breakdown) -> Giảm Margin
     let maxLeverage = symbol === 'BTCUSDT' || symbol === 'ETHUSDT' ? 5 : 3;
-    if (macroData.volatilitySkew === 'FAT_TAIL') maxLeverage = 2; // Ép đòn bẩy mùa thiên nga đen
+    if (macroData.volatilitySkew === 'FAT_TAIL' || macroData.isWeekend) maxLeverage = 1.5; 
 
     const isLeverageSafe = tradeSetup.tradeType === 'SPOT' ? true : effectiveLeverage <= maxLeverage;
 
-    // TÍNH TOÁN KELLY DỰA TRÊN LỊCH SỬ
-    // Dùng WinRate mặc định 40% nếu chưa có dữ liệu lịch sử
-    const baseWinRate = tradeStats.totalClosed >= 10 ? tradeStats.winRate : 40; 
-    const kellyPct = QuantMath.kellyCriterion(baseWinRate, calculatedRR);
+    const kellyDec = QuantMath.kellyCriterion(tradeStats.winRate, tradeStats.historicalRR);
+    const kellyPct = tradeStats.hasEnoughData ? (kellyDec * 100) : 0;
 
     return {
       slPercent: (slPercent * 100).toFixed(2), riskAmountUSD: riskAmountUSD.toFixed(2), positionSizeUSD: positionSizeUSD.toFixed(2),
-      effectiveLeverage: effectiveLeverage.toFixed(2), isLeverageSafe, calculatedRR: calculatedRR.toFixed(2), maxLeverage, costDragUSD: totalCostDragUSD.toFixed(2),
-      kelly: kellyPct.toFixed(2)
+      effectiveLeverage: effectiveLeverage.toFixed(2), isLeverageSafe, theoreticalRR: theoreticalRR.toFixed(2), maxLeverage, costDragUSD: totalCostDragUSD.toFixed(2),
+      kellyPct: kellyPct.toFixed(2)
     };
   }, [autoData, macroData, tradeSetup, symbol, tradeStats]);
 
@@ -353,34 +390,47 @@ export default function AntiFragileTerminal() {
       entry: autoData.currentPrice, slTech: parseFloat(sl.toFixed(2)), tpTech: parseFloat(tp.toFixed(2)),
       htfAligned: (suggestedDirection === 'LONG' && autoData.currentPrice > autoData.htfSma200) || (suggestedDirection === 'SHORT' && autoData.currentPrice < autoData.htfSma200)
     }));
-    showToast("✅ Đã thiết lập thông số cơ học an toàn.");
+    showToast("✅ Auto Setup: Tối ưu Rủi ro Đuôi béo.");
   };
 
   const checklist = useMemo(() => {
-    if (!autoData || !mathCore) return [];
+    if (!autoData || !mathCore) return { hardGates: [], softGates: [], softCount: 0, isApproved: false };
     
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;
     const isLsrExtreme = macroData.longShortRatio > 2.5 || macroData.longShortRatio < 0.4;
     const isPsychoTrap = (isFundingExtreme && autoData.isOiSpiking) || isLsrExtreme;
     const isSqueeze = autoData.bbw < 5 && autoData.adx < 20; 
     
-    // Nếu Sentiment Euphoric mà Giá phân kỳ/đám đông xả -> Chặn
+    // Nếu Euphoria trên Social nhưng Cá mập Taker xả hàng -> Bẫy phân kỳ
     const isSocialTrap = macroData.socialSentiment === 'EUPHORIA' && macroData.takerBuySellRatio < 1;
+    // Bẫy cuối tuần thanh khoản mỏng
+    const isWeekendTrap = macroData.isWeekend && tradeSetup.tradeType === 'FUTURES' && mathCore.effectiveLeverage > 2;
 
-    return [
-      { id: 1, passed: autoData.adx > 25 || isSqueeze, text: `MARKET REGIME: Xu hướng rõ (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%).` },
-      { id: 2, passed: !isSocialTrap, text: `SOCIAL SENTIMENT: Dòng tiền Social (${macroData.socialSentiment}) không bị phân kỳ với Taker Volume.` },
-      { id: 3, passed: !isPsychoTrap && macroData.toxicFlow !== 'EXTREME', text: `MICROSTRUCTURE: Thanh khoản an toàn, Toxic Flow thấp (L/S: ${macroData.longShortRatio.toFixed(2)}).` },
-      { id: 4, passed: tradeSetup.passedSFP && !macroData.newsTrap, text: "CHỐNG THAO TÚNG: Xác nhận SFP (Quét đỉnh/đáy) & Đặt Limit Order." },
-      { id: 5, passed: mathCore.isLeverageSafe && parseFloat(mathCore.positionSizeUSD) > 0, text: `TOÁN HỌC RISK: Đòn bẩy hiệu dụng an toàn (${mathCore.effectiveLeverage}x <= ${mathCore.maxLeverage}x).` },
-      { id: 6, passed: mathCore.kelly > 0 || tradeSetup.tradeType === 'SPOT', text: `KỲ VỌNG TOÁN HỌC (EV): Kelly Criterion > 0 (${mathCore.kelly}%), hệ thống sinh lời thực tế.` },
+    const hardGates = [
+      { id: 'h1', passed: tradeSetup.execution === 'LIMIT', text: "EXECUTION: Limit Order (Không đốt tài khoản vào Spread/Slippage)" },
+      { id: 'h2', passed: mathCore.isLeverageSafe && parseFloat(mathCore.positionSizeUSD) > 0, text: `RISK: Margin an toàn (<= ${mathCore.maxLeverage}x) đã tính Fat-Tail` },
+      { id: 'h3', passed: tradeStats.hasEnoughData ? mathCore.kellyPct > 0 : parseFloat(mathCore.theoreticalRR) >= 1.5, 
+        text: tradeStats.hasEnoughData 
+          ? `EXPECTANCY: Kelly Dương (${mathCore.kellyPct}% Vốn)` 
+          : `EXPECTANCY: R:R >= 1.5 (Chưa đủ lịch sử Kelly)` }
     ];
-  }, [autoData, mathCore, tradeSetup, macroData]);
 
-  const isApproved = checklist.filter(c => c.passed).length >= 5 && !systemError && tradeSetup.execution === 'LIMIT';
+    const softGates = [
+      { id: 's1', passed: autoData.adx > 25 || isSqueeze, text: `REGIME: Có xu hướng (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%)` },
+      { id: 's2', passed: !isSocialTrap, text: `SOCIAL: Dòng tiền Social (${macroData.socialSentiment}) đồng thuận với Taker Volume.` },
+      { id: 's3', passed: !isPsychoTrap && macroData.toxicFlow !== 'EXTREME' && !isWeekendTrap, text: `MICROSTRUCTURE: Thanh khoản an toàn, Không kẹt bẫy Cuối tuần.` },
+      { id: 's4', passed: tradeSetup.passedSFP, text: "PRICE ACTION: Có SFP (Đã quét Stop-hunt)." }
+    ];
+
+    const hardPassed = hardGates.every(g => g.passed);
+    const softCount = softGates.filter(g => g.passed).length;
+    const isApproved = hardPassed && softCount >= 3 && !systemError;
+
+    return { hardGates, softGates, softCount, isApproved };
+  }, [autoData, mathCore, tradeSetup, macroData, tradeStats, systemError]);
 
   // ==========================================
-  // 🧠 QUẢN LÝ QUỸ QUANT (GEMINI V1BETA - MACRO ECONOMIST)
+  // 🧠 GEMINI V1BETA: INSTITUTIONAL QUANT MANAGER
   // ==========================================
   const runGeminiAnalysis = async () => {
     if (geminiCooldown > 0) return;
@@ -396,34 +446,32 @@ export default function AntiFragileTerminal() {
     setAiAnalysis('');
     
     try {
-      // Bối cảnh dữ liệu lịch sử
-      const winRateContext = tradeStats.totalClosed >= 10 
-        ? `Trader này có lịch sử ${tradeStats.totalClosed} lệnh, Win Rate: ${tradeStats.winRate.toFixed(1)}%.` 
-        : `Trader mới chưa đủ dữ liệu thống kê (Giả định Win Rate 40%).`;
+      const winRateContext = tradeStats.hasEnoughData 
+        ? `Lịch sử ${tradeStats.totalClosed} lệnh của ${symbol}, Win Rate: ${(tradeStats.winRate * 100).toFixed(1)}%, Avg R:R: ${tradeStats.historicalRR.toFixed(2)}.` 
+        : `Trader mới, dữ liệu quá mỏng (< 10 lệnh), cẩn thận Overfitting.`;
 
       const prompt = `
-        Giao thức "ANTI-FRAGILE V4.2 - MACRO ECONOMIST & QUANT MANAGER".
-        Vai trò: Giám đốc Quản lý Quỹ Phòng hộ (Hedge Fund). Phân tích cấu trúc vi mô, rủi ro phân phối đuôi béo (Fat-tail), tương quan vĩ mô (Macro Correlation) và độ lệch Tâm lý xã hội (Social Sentiment Bias).
+        Giao thức "ANTI-FRAGILE V4.4 - INSTITUTIONAL QUANT MANAGER".
+        Vai trò: Giám đốc Quản trị Rủi ro (Hedge Fund). Phân tích cấu trúc vi mô, rủi ro phân phối đuôi béo (Fat-tail), tương quan vĩ mô và ma sát thị trường.
         
-        THÔNG SỐ LỊCH SỬ TRADER: ${winRateContext}
+        LỊCH SỬ GIAO DỊCH SUPABASE: ${winRateContext}
 
-        DỮ LIỆU MICROSTRUCTURE & VĨ MÔ (${symbol} - ${intervalTime}):
-        - Biến động: Fat-Tail Risk = ${macroData.volatilitySkew} | Macro SPX/DXY Correlation = ${macroData.macroCorrelation}
-        - Tâm lý Mạng xã hội (Twitter/X): ${macroData.socialSentiment}
-        - Toxic Flow (VPIN): ${macroData.toxicFlow} | Taker Buy/Sell: ${macroData.takerBuySellRatio.toFixed(2)} | L/S Ratio: ${macroData.longShortRatio.toFixed(2)}
-        - Hành động giá: $${autoData.currentPrice} | BBW (Squeeze) = ${autoData.bbw.toFixed(2)}% | MVRV = ${macroData.mvrvZScore}
+        VĨ MÔ & TÂM LÝ XÃ HỘI (${symbol} - ${intervalTime}):
+        - Biến động: Fat-Tail Risk = ${macroData.volatilitySkew} | Cuối tuần (Cointegration Risk) = ${macroData.isWeekend ? 'Có' : 'Không'}
+        - Tâm lý Mạng xã hội: ${macroData.socialSentiment} | Toxic Flow (VPIN): ${macroData.toxicFlow}
+        - L/S Ratio: ${macroData.longShortRatio.toFixed(2)} | Taker Buy/Sell (Dòng tiền chủ động): ${macroData.takerBuySellRatio.toFixed(2)}
         
-        VỊ THẾ CHUẨN BỊ VÀO:
-        - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction} | Limit Order.
-        - Đòn bẩy hiệu dụng: ${mathCore.effectiveLeverage}x (Max do rủi ro Altcoin/Fat-tail: ${mathCore.maxLeverage}x).
-        - Kỳ vọng Kelly (Kelly Criterion): ${mathCore.kelly}% (Nếu < 0 nghĩa là lệnh này đánh bạc lỗ vốn dài hạn).
-        - Chi phí ma sát (Slippage + Fee): $${mathCore.costDragUSD}.
+        THÔNG SỐ VỊ THẾ BẮT BUỘC (RISK METRICS):
+        - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction} | Loại lệnh: ${tradeSetup.execution}.
+        - Margin hiệu dụng: ${mathCore.effectiveLeverage}x (Giới hạn tối đa: ${mathCore.maxLeverage}x).
+        - Chi phí ma sát (Spread+Slippage+Fee): $${mathCore.costDragUSD} (Sẽ bị trừ thẳng vào lợi nhuận).
+        - Kelly (Lịch sử): ${tradeStats.hasEnoughData ? mathCore.kellyPct + '%' : 'N/A'}.
 
-        Yêu cầu:
-        1. Phân tích sự lệch pha giữa Tâm lý đám đông (Social Sentiment) và Dòng tiền lớn (Taker Buy/Sell).
-        2. Dựa vào rủi ro Fat-Tail và sự phá vỡ tương quan vĩ mô (nếu có), lệnh này có đối mặt rủi ro Thiên nga đen hay không?
-        3. Kết luận cuối cùng dựa trên công thức Kelly: Lệnh này có "Kỳ vọng dương (EV > 0)" không?
-        Trả lời sắc bén, chuyên môn cao trong đúng 4 câu tiếng Việt. Đừng dùng từ dư thừa.
+        Yêu cầu phản biện khắc nghiệt:
+        1. Trader có đang Overfitting (chỉ nhìn quá khứ mà bỏ qua bẫy thanh khoản Cuối tuần/Toxic Flow hiện tại)?
+        2. So sánh Social Sentiment (Đám đông) và Taker Volume (Cá voi), lệnh này có rủi ro đu đỉnh/đáy không?
+        3. Với Cost Drag $${mathCore.costDragUSD} và đòn bẩy ${mathCore.effectiveLeverage}x, Kelly có xác nhận đây là lệnh sinh lời dài hạn không?
+        Trả lời sắc bén, chuyên môn, đúng 4 câu tiếng Việt. Không dùng định dạng markdown rườm rà.
       `;
 
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
@@ -451,7 +499,7 @@ export default function AntiFragileTerminal() {
       setGeminiCooldown(15); 
     } catch (error) {
       console.error(error);
-      setAiAnalysis(error.message === 'RATE_LIMIT' ? '❌ Lỗi 429: Rate Limit (Quá tải). Chờ 30s.' : '❌ Lỗi kết nối Gemini AI.');
+      setAiAnalysis(error.message === 'RATE_LIMIT' ? '❌ Lỗi 429: Rate Limit (Quá tải). Chờ 30s.' : '❌ Lỗi kết nối Gemini API.');
       setGeminiCooldown(30); 
     }
     setIsAnalyzing(false);
@@ -463,13 +511,14 @@ export default function AntiFragileTerminal() {
       const payload = {
         symbol, interval: intervalTime, type: tradeSetup.tradeType, direction: tradeSetup.direction,
         entry: parseFloat(tradeSetup.entry), sl: parseFloat(tradeSetup.slTech), tp: parseFloat(tradeSetup.tpTech),
-        risk_amount_usd: parseFloat(mathCore.riskAmountUSD), rr: parseFloat(mathCore.calculatedRR),
+        risk_amount_usd: parseFloat(mathCore.riskAmountUSD), rr: parseFloat(mathCore.theoreticalRR),
         adx: autoData.adx, atr: autoData.atr14, funding_rate: autoData.fundingRate,
         oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(macroData.fgiValue),
         trend_sma200: (autoData.currentPrice > autoData.sma200) ? 'ABOVE' : 'BELOW',
         mvrv: parseFloat(macroData.mvrvZScore), 
         liquidations: macroData.toxicFlow, 
-        news_trap: Boolean(macroData.newsTrap), leverage: parseFloat(mathCore.effectiveLeverage),
+        news_trap: Boolean(macroData.isWeekend), // Lưu log lệnh có đánh cuối tuần hay không
+        leverage: parseFloat(mathCore.effectiveLeverage),
         status: 'OPEN', pnl_usd: 0
       };
       const { error } = await supabase.from('trade_logs').insert([payload]);
@@ -487,10 +536,14 @@ export default function AntiFragileTerminal() {
        const positionCoins = riskUsd / riskDistance;
        if (direction === 'LONG') pnl = (currentPx - entry) * positionCoins;
        else pnl = (entry - currentPx) * positionCoins;
+       
+       // Trừ Cost Drag khi đóng lệnh bằng tay (Giả định đóng Limit)
+       const closeCost = QuantMath.costDrag(currentPx, 'FUTURES', 'LIMIT', autoData.fundingRate/100, macroData.bidAskSpread, 1);
+       pnl = pnl - (closeCost * positionCoins / currentPx);
     }
     try {
       await supabase.from('trade_logs').update({ status: pnl >= 0 ? 'WIN' : 'LOSS', close_price: currentPx, pnl_usd: pnl }).eq('id', logId);
-      showToast(`✂️ Đã đóng vị thế. PnL: ${pnl.toFixed(2)}$`);
+      showToast(`✂️ Đã đóng vị thế. PnL (Đã trừ phí): ${pnl.toFixed(2)}$`);
     } catch (e) { console.error(e); }
   };
 
@@ -512,11 +565,16 @@ export default function AntiFragileTerminal() {
       <div className="max-w-7xl mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-slate-800/80 pb-5">
         <div>
           <h1 className="text-xl md:text-2xl font-black text-emerald-500 flex items-center gap-2 tracking-tighter">
-            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V4.2 (Macro Quant)</span>
+            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V4.4 (Inst. Macro)</span>
           </h1>
           <p className="text-slate-500 text-[10px] mt-1 uppercase tracking-widest flex items-center gap-2">
-            {lastUpdated ? `Thị trường: ${lastUpdated.toLocaleTimeString()}` : 'Khởi động Core...'}
-            {tradeStats.totalClosed > 0 && <span className="text-purple-400 border border-purple-900/50 bg-purple-900/10 px-1.5 rounded">WR: {tradeStats.winRate.toFixed(1)}% ({tradeStats.totalClosed} lệnh)</span>}
+            {lastUpdated ? `Sync: ${lastUpdated.toLocaleTimeString()}` : 'Khởi động Core...'}
+            {macroData.isWeekend && <span className="text-amber-500 border border-amber-900/50 bg-amber-900/10 px-1.5 rounded">CẢNH BÁO CUỐI TUẦN</span>}
+            {tradeStats.hasEnoughData && (
+               <span className="text-purple-400 border border-purple-900/50 bg-purple-900/10 px-1.5 rounded">
+                 WR: {(tradeStats.winRate * 100).toFixed(1)}% | Avg R:R: {tradeStats.historicalRR.toFixed(2)}
+               </span>
+            )}
           </p>
         </div>
         
@@ -546,10 +604,9 @@ export default function AntiFragileTerminal() {
           {/* ĐỘNG LỰC HỌC VĨ MÔ & TÂM LÝ XÃ HỘI */}
           <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 shadow-xl">
             <h2 className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-2 mb-4">
-              <Database className="w-3 h-3 text-purple-400" /> ĐỘNG LỰC HỌC VĨ MÔ & TÂM LÝ XÃ HỘI (MANUAL & API)
+              <Database className="w-3 h-3 text-purple-400" /> TÂM LÝ ĐÁM ĐÔNG & DÒNG TIỀN (MANUAL + API)
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {/* Dữ liệu API tự động */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">GLOBAL L/S RATIO</label>
                   <div className={`font-bold text-sm mt-1 ${macroData.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
@@ -562,8 +619,11 @@ export default function AntiFragileTerminal() {
                     {macroData.takerBuySellRatio.toFixed(2)}
                   </div>
                 </div>
+                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800">
+                  <label className="text-[8px] text-slate-500 block mb-1">FEAR & GREED (API)</label>
+                  <div className="font-bold text-sm text-orange-400 mt-1">{macroData.fgiValue}</div>
+                </div>
                 
-                {/* Vùng Nhập liệu Phức hợp Mới */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-cyan-500/50">
                   <label className="text-[8px] font-bold text-cyan-500 block mb-1 flex gap-1 items-center">SOCIAL SENTIMENT</label>
                   <select value={macroData.socialSentiment} onChange={e => setMacroData({...macroData, socialSentiment: e.target.value})} className="w-full bg-transparent text-cyan-400 font-bold outline-none text-[10px] cursor-pointer mt-1">
@@ -572,6 +632,7 @@ export default function AntiFragileTerminal() {
                     <option value="EUPHORIA">Hưng phấn (Đỉnh)</option>
                   </select>
                 </div>
+
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-purple-500/50">
                   <label className="text-[8px] font-bold text-purple-500 block mb-1 flex gap-1 items-center">FAT-TAIL RISK</label>
                   <select value={macroData.volatilitySkew} onChange={e => setMacroData({...macroData, volatilitySkew: e.target.value})} className="w-full bg-transparent text-purple-400 font-bold outline-none text-[10px] cursor-pointer mt-1">
@@ -579,8 +640,6 @@ export default function AntiFragileTerminal() {
                     <option value="FAT_TAIL">Đuôi béo (Nguy hiểm)</option>
                   </select>
                 </div>
-
-                {/* Các dữ liệu vĩ mô cũ */}
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-red-500/50">
                   <label className="text-[8px] font-bold text-red-500 block mb-1 flex gap-1 items-center"><Key className="w-2.5 h-2.5"/> TOXIC FLOW</label>
                   <select value={macroData.toxicFlow} onChange={e => setMacroData({...macroData, toxicFlow: e.target.value})} className="w-full bg-transparent text-red-400 font-bold outline-none text-xs cursor-pointer mt-1.5">
@@ -589,22 +648,14 @@ export default function AntiFragileTerminal() {
                     <option value="EXTREME">Cực đoan</option>
                   </select>
                 </div>
+
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-amber-500/50">
-                  <label className="text-[8px] text-slate-500 block mb-1">MACD / SPX CORREL</label>
-                  <select value={macroData.macroCorrelation} onChange={e => setMacroData({...macroData, macroCorrelation: e.target.value})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-xs cursor-pointer mt-1.5">
-                    <option value="HIGH">Đồng pha vĩ mô</option>
-                    <option value="LOW">Phân rã (Độc lập)</option>
-                  </select>
+                  <label className="text-[8px] text-slate-500 block mb-1">SPREAD CỦA COIN (%)</label>
+                  <input type="number" step="0.01" value={macroData.bidAskSpread} onChange={e => setMacroData({...macroData, bidAskSpread: Number(e.target.value)})} className="w-full bg-transparent text-amber-400 font-bold outline-none text-sm"/>
                 </div>
                 <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 focus-within:border-emerald-500/50">
                   <label className="text-[8px] text-slate-500 block mb-1">VỐN TỔNG (USD)</label>
                   <input type="number" value={macroData.capital} onChange={e => setMacroData({...macroData, capital: Number(e.target.value)})} className="w-full bg-transparent text-emerald-400 font-bold outline-none text-sm"/>
-                </div>
-                <div className="bg-[#0a0a0c] p-2 rounded border border-slate-800 flex items-center justify-center">
-                   <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-slate-400 hover:text-red-400 transition-colors">
-                     <input type="checkbox" checked={macroData.newsTrap} onChange={e => setMacroData({...macroData, newsTrap: e.target.checked})} className="accent-red-500 w-3 h-3 bg-black"/>
-                     Bẫy Tin Tức
-                   </label>
                 </div>
             </div>
             
@@ -670,17 +721,21 @@ export default function AntiFragileTerminal() {
                       <span className="text-red-400 font-black text-sm">${mathCore?.riskAmountUSD}</span>
                     </div>
                     <div className="flex justify-between items-end border-b border-slate-800 pb-1.5">
-                      <span className="text-[10px] font-bold text-slate-500">Chi phí ma sát (Slippage + Fee):</span>
+                      <span className="text-[10px] font-bold text-slate-500">Cost Drag (Fee+Spread):</span>
                       <span className="text-amber-500 font-black text-[10px]">-${mathCore?.costDragUSD}</span>
                     </div>
                     <div className="flex justify-between items-end border-b border-slate-800 pb-1.5">
                       <span className="text-[10px] font-bold text-slate-500">Kỳ Vọng (R:R thực tế):</span>
-                      <span className={`font-black text-sm ${parseFloat(mathCore?.calculatedRR) >= 1.5 ? 'text-emerald-400' : 'text-amber-500'}`}>1 : {mathCore?.calculatedRR}</span>
+                      <span className={`font-black text-sm ${parseFloat(mathCore?.theoreticalRR) >= 1.5 ? 'text-emerald-400' : 'text-amber-500'}`}>1 : {mathCore?.theoreticalRR}</span>
                     </div>
                     <div className="flex justify-between items-center bg-slate-950 p-2 rounded border border-slate-800">
                       <div className="flex flex-col gap-1">
-                        <span className="text-[8px] text-slate-500 uppercase font-bold flex items-center gap-1"><BarChart3 className="w-3 h-3 text-cyan-500"/> Kỳ Vọng Toán Học (EV):</span>
-                        <span className={`text-[11px] font-black ${mathCore?.kelly > 0 ? 'text-cyan-400' : 'text-red-400'}`}>{mathCore?.kelly > 0 ? `+${mathCore?.kelly}% VỐN` : 'ÂM (LỖ DÀI HẠN)'}</span>
+                        <span className="text-[8px] text-slate-500 uppercase font-bold flex items-center gap-1"><BarChart3 className="w-3 h-3 text-cyan-500"/> Kỳ Vọng EV Lịch Sử:</span>
+                        {tradeStats.hasEnoughData ? (
+                          <span className={`text-[11px] font-black ${mathCore?.kellyPct > 0 ? 'text-cyan-400' : 'text-red-400'}`}>{mathCore?.kellyPct > 0 ? `+${mathCore?.kellyPct}% VỐN` : 'ÂM (LỖ DÀI HẠN)'}</span>
+                        ) : (
+                          <span className="text-[9px] text-slate-500 flex items-center gap-1"><Lock className="w-2.5 h-2.5"/> [ƯỚC TÍNH - THIẾU DATA]</span>
+                        )}
                       </div>
                       <div className="flex flex-col items-end gap-1">
                          <span className="text-[8px] text-slate-500 uppercase font-bold">Đòn Bẩy Max:</span>
@@ -748,7 +803,7 @@ export default function AntiFragileTerminal() {
           </div>
 
           <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 flex-grow flex flex-col shadow-xl">
-             <h2 className="text-[10px] font-bold text-slate-300 uppercase mb-4 flex items-center gap-2 border-b border-slate-800 pb-3"><ShieldAlert className="w-4 h-4 text-emerald-500" /> BỘ LỌC KIỂM DUYỆT V4.2 (Tối thiểu 5/6 Passed)</h2>
+             <h2 className="text-[10px] font-bold text-slate-300 uppercase mb-4 flex items-center gap-2 border-b border-slate-800 pb-3"><ShieldAlert className="w-4 h-4 text-emerald-500" /> BỘ LỌC KIỂM DUYỆT V4.4 (Hard/Soft Gates)</h2>
              
              {/* BƯỚC CHECK TAY (Human Override) */}
              <div className="mb-4 space-y-2 bg-[#0a0a0c] p-3 rounded-lg border border-slate-800">
@@ -763,26 +818,42 @@ export default function AntiFragileTerminal() {
                </label>
              </div>
 
-             {/* TỔNG HỢP KIỂM DUYỆT */}
-             <div className="flex-grow space-y-3 mt-2">
-               {checklist.map((item) => (
-                 <div key={item.id} className="flex items-start gap-2.5 bg-slate-900/30 p-2.5 rounded border border-slate-800/50">
-                   {item.passed ? <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" /> : <XCircle className="w-4 h-4 text-slate-700 shrink-0" />}
-                   <span className={`text-[10px] leading-relaxed font-medium ${item.passed ? 'text-slate-300' : 'text-slate-600 line-through'}`}>{item.text}</span>
-                 </div>
-               ))}
+             {/* TỔNG HỢP KIỂM DUYỆT: HARD GATES */}
+             <div className="mb-2">
+                <span className="text-[8px] font-black text-red-500 uppercase tracking-widest block mb-2 border-b border-slate-800 pb-1">Cửa tử - Hard Gates (Bắt buộc 100%)</span>
+                <div className="space-y-2">
+                  {logicGates.hardGates.map((item) => (
+                    <div key={item.id} className="flex items-start gap-2.5 bg-red-950/10 p-2 rounded border border-red-900/20">
+                      {item.passed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" /> : <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />}
+                      <span className={`text-[9.5px] leading-relaxed font-bold ${item.passed ? 'text-slate-300' : 'text-red-400'}`}>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
+             </div>
+
+             {/* TỔNG HỢP KIỂM DUYỆT: SOFT GATES */}
+             <div className="flex-grow mt-3">
+                <span className="text-[8px] font-black text-blue-500 uppercase tracking-widest block mb-2 border-b border-slate-800 pb-1">Tín hiệu động - Soft Gates (Yêu cầu {logicGates.softCount}/4)</span>
+                <div className="space-y-2">
+                  {logicGates.softGates.map((item) => (
+                    <div key={item.id} className="flex items-start gap-2.5 bg-blue-950/10 p-2 rounded border border-blue-900/20">
+                      {item.passed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" /> : <XCircle className="w-3.5 h-3.5 text-slate-700 shrink-0 mt-0.5" />}
+                      <span className={`text-[9.5px] leading-relaxed font-medium ${item.passed ? 'text-slate-300' : 'text-slate-600 line-through'}`}>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
              </div>
 
              {/* NÚT LƯU LỆNH DATABASE */}
              <div className="mt-5 pt-5 border-t border-slate-800 flex flex-col gap-2">
-                {tradeSetup.execution === 'MARKET' && (
+                {!logicGates.isApproved && (
                   <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-[9px] p-2 rounded flex items-center gap-1.5 mb-2">
-                    <AlertTriangle className="w-3 h-3 shrink-0" /> Hệ thống khóa: Cấm dùng Market Order. Trượt giá sẽ hủy diệt tài khoản của bạn.
+                    <AlertTriangle className="w-3 h-3 shrink-0" /> Hệ thống khóa: Lệnh rớt Hard Gate hoặc chưa đủ Soft Gate (Đạt {logicGates.softCount}/4).
                   </div>
                 )}
-                <button disabled={!isApproved} onClick={handleSaveTradeLog} className={`w-full py-4 rounded-lg font-black text-[11px] tracking-widest flex items-center justify-center gap-2 transition-all duration-300 shadow-xl
-                    ${isApproved ? 'bg-emerald-500 text-black hover:bg-emerald-400 hover:scale-[1.01] shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'bg-slate-800/50 text-slate-600 border border-slate-700 cursor-not-allowed'}`}>
-                  {isApproved ? <><Save className="w-4 h-4"/> ĐỦ ĐIỀU KIỆN - LƯU VÀO SỔ TAY DB</> : 'KHÓA BẢO VỆ: CHƯA ĐẠT CHUẨN'}
+                <button disabled={!logicGates.isApproved} onClick={handleSaveTradeLog} className={`w-full py-4 rounded-lg font-black text-[11px] tracking-widest flex items-center justify-center gap-2 transition-all duration-300 shadow-xl
+                    ${logicGates.isApproved ? 'bg-emerald-500 text-black hover:bg-emerald-400 hover:scale-[1.01] shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'bg-slate-800/50 text-slate-600 border border-slate-700 cursor-not-allowed'}`}>
+                  {logicGates.isApproved ? <><Save className="w-4 h-4"/> ĐỦ ĐIỀU KIỆN - LƯU VÀO SỔ TAY DB</> : 'KHÓA BẢO VỆ: CHƯA ĐẠT CHUẨN'}
                 </button>
              </div>
           </div>

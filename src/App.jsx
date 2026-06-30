@@ -1,21 +1,18 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, AlertTriangle } from 'lucide-react';
+import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, PowerOff } from 'lucide-react';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
 // ==========================================
-// 1. SUPABASE & ENV SETUP
+// 1. SUPABASE & ENV SETUP (NETLIFY VITE)
 // ==========================================
-const supabaseUrl = ''; 
-const supabaseKey = ''; 
-const geminiApiKey = ''; 
-
-// const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL || ''; 
-// const supabaseKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || ''; 
-// const geminiApiKey = import.meta.env?.VITE_GEMINI_API_KEY || '';
+// LƯU Ý: Các dòng import.meta.env này sẽ hoạt động hoàn hảo khi chạy trên Netlify.
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''; 
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''; 
+const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || ''; 
 
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// --- LÕI TOÁN HỌC ĐỊNH LƯỢNG (BỔ SUNG RSI & BBW THEO V3.0) ---
+// --- LÕI TOÁN HỌC ĐỊNH LƯỢNG (PURE MATH CORE) ---
 const QuantMath = {
   sma: (data, period) => {
     if (!data || data.length < period) return 0;
@@ -71,7 +68,6 @@ const QuantMath = {
     }
     return dxs.slice(-period).reduce((a,b)=>a+b,0) / period || 0;
   },
-  // MỚI: Tính RSI (Theo tài liệu V3.0)
   rsi: (closes, period = 14) => {
     if (closes.length < period + 1) return 50;
     let gains = 0, losses = 0;
@@ -91,7 +87,6 @@ const QuantMath = {
     const rs = avgGain / avgLoss;
     return 100 - (100 / (1 + rs));
   },
-  // MỚI: Tính Bollinger Bands & BBW (Để nhận diện Squeeze)
   bollinger: (closes, period = 20, stdDev = 2) => {
     if (closes.length < period) return { bbw: 0 };
     const slice = closes.slice(-period);
@@ -100,7 +95,7 @@ const QuantMath = {
     const dev = Math.sqrt(variance);
     const upper = sma + (stdDev * dev);
     const lower = sma - (stdDev * dev);
-    const bbw = ((upper - lower) / sma) * 100; // Trả về % độ rộng
+    const bbw = ((upper - lower) / sma) * 100; 
     return { bbw };
   }
 };
@@ -121,12 +116,12 @@ export default function AntiFragileTerminal() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [geminiCooldown, setGeminiCooldown] = useState(0);
 
-  // THAY THẾ: Trạng thái Sentiment từ Binance (Thay cho Onchain/CQ)
+  // Trạng thái Sentiment từ Binance API
   const [sentimentData, setSentimentData] = useState({
     capital: 10000,
     fgiValue: 50, 
-    longShortRatio: 1.0,  // Từ Binance API
-    takerBuySellRatio: 1.0, // Từ Binance API
+    longShortRatio: 1.0, 
+    takerBuySellRatio: 1.0, 
     newsTrap: false
   });
 
@@ -145,7 +140,7 @@ export default function AntiFragileTerminal() {
     if (geminiCooldown > 0) { const t = setTimeout(() => setGeminiCooldown(c => c - 1), 1000); return () => clearTimeout(t); }
   }, [geminiCooldown]);
 
-  // --- SUPABASE SYNC LOGS ---
+  // --- SUPABASE SYNC ---
   useEffect(() => {
     if (!supabase) return;
     const fetchLogs = async () => {
@@ -164,7 +159,7 @@ export default function AntiFragileTerminal() {
     return () => supabase.removeChannel(subscription);
   }, []);
 
-  // --- TỔNG LỰC DATA FETCHING TỪ BINANCE (BAO GỒM SENTIMENT) ---
+  // --- TỔNG LỰC DATA FETCHING TỪ BINANCE ---
   useEffect(() => {
     let isMounted = true;
     const fetchData = async () => {
@@ -172,14 +167,12 @@ export default function AntiFragileTerminal() {
       try {
         const oiInterval = ['15m', '1h', '4h', '1d'].includes(intervalTime) ? intervalTime : '1d';
         
-        // Kéo toàn bộ dữ liệu từ Binance & Alternative.me
         const [klinesRes, fundingRes, oiCurrentRes, oiHistRes, fgiRes, lsrRes, takerRes] = await Promise.all([
           fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalTime}&limit=150`),
           fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=1`),
           fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`),
           fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=${oiInterval}&limit=30`),
           fetch('https://api.alternative.me/fng/?limit=1'),
-          // Bổ sung Binance Sentiment API
           fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
           fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=${oiInterval}&limit=1`)
         ]);
@@ -198,7 +191,6 @@ export default function AntiFragileTerminal() {
           if (fgiData?.data?.[0]?.value) fetchedFgi = parseInt(fgiData.data[0].value);
         }
 
-        // Parse Binance Sentiment
         let currentLsr = 1.0;
         let currentTaker = 1.0;
         if (lsrRes.ok) {
@@ -298,7 +290,6 @@ export default function AntiFragileTerminal() {
     let suggestedType = 'FUTURES';
     let suggestedDirection = autoData.currentPrice > autoData.sma200 ? 'LONG' : 'SHORT';
     
-    // Nếu RSI quá mua/bán và BBW hẹp (Squeeze)
     if (autoData.rsi < 30 && sentimentData.fgiValue < 20 && intervalTime === '1d') {
       suggestedType = 'SPOT'; suggestedDirection = 'LONG';
     }
@@ -320,12 +311,11 @@ export default function AntiFragileTerminal() {
   const checklist = useMemo(() => {
     if (!autoData || !mathCore) return [];
     
-    // Áp dụng lý thuyết V3.0: Chặn bẫy tâm lý bằng Binance Data
     const isFundingExtreme = Math.abs(autoData.fundingRate) > 0.05;
     const isLsrExtreme = sentimentData.longShortRatio > 2.5 || sentimentData.longShortRatio < 0.4;
     const isPsychoTrap = (isFundingExtreme && autoData.isOiSpiking) || isLsrExtreme;
 
-    const isSqueeze = autoData.bbw < 5 && autoData.adx < 20; // BBW hẹp, không trend
+    const isSqueeze = autoData.bbw < 5 && autoData.adx < 20; 
     
     return [
       { id: 1, passed: autoData.adx > 25 || isSqueeze, text: `MARKET REGIME: Xu hướng rõ (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%).` },
@@ -340,44 +330,68 @@ export default function AntiFragileTerminal() {
   const isApproved = checklist.filter(c => c.passed).length >= 5 && !systemError;
 
   // ==========================================
-  // 🧠 GEMINI AI QUANT ANALYST (UPDATED FOR BINANCE)
+  // 🧠 GEMINI INTERACTIONS API (CHUẨN TÀI LIỆU V1BETA)
   // ==========================================
   const runGeminiAnalysis = async () => {
     if (geminiCooldown > 0) return;
     if (!autoData || !mathCore) return;
+    
+    // Đọc API Key từ Netlify.
+    const apiKey = geminiApiKey; 
+    
+    if (!apiKey) {
+      setAiAnalysis('⚠️ LỖI: Chưa cấu hình VITE_GEMINI_API_KEY. Vui lòng thêm biến này vào Environment Variables trên Netlify.');
+      return;
+    }
+
     setIsAnalyzing(true);
     setAiAnalysis('');
     
     try {
-      const apiKey = geminiApiKey || "YOUR_GEMINI_API_KEY"; 
-      if (!apiKey || apiKey === "YOUR_GEMINI_API_KEY") {
-        setAiAnalysis('LỖI: Chưa cấu hình VITE_GEMINI_API_KEY.');
-        setIsAnalyzing(false); return;
-      }
-
       const prompt = `
-        Đóng vai AI Quant Analyst hệ thống "ANTI-FRAGILE V3.7". Phân tích dữ liệu Binance sau:
+        Đóng vai AI Quant Analyst hệ thống "ANTI-FRAGILE V3.8". Phân tích dữ liệu Binance sau:
         - Giá: $${autoData.currentPrice} | RSI(14): ${autoData.rsi.toFixed(1)}
         - ADX: ${autoData.adx.toFixed(1)} | BBW (Squeeze): ${autoData.bbw.toFixed(2)}%
-        - Binance L/S Ratio: ${sentimentData.longShortRatio.toFixed(2)} (Báo hiệu phe nào đang đông)
-        - Binance Taker Buy/Sell: ${sentimentData.takerBuySellRatio.toFixed(2)} (Khớp chủ động)
+        - Binance L/S Ratio: ${sentimentData.longShortRatio.toFixed(2)}
+        - Binance Taker Buy/Sell: ${sentimentData.takerBuySellRatio.toFixed(2)}
         - Setup: ${tradeSetup.tradeType} ${tradeSetup.direction}, R:R=1:${mathCore.calculatedRR}.
         
         Nhiệm vụ: Dựa vào sự đối lập hoặc đồng thuận của L/S Ratio và Taker Volume với hành động giá, lệnh này có rủi ro bị Stop-hunt không? Trả lời bằng đúng 3 câu tiếng Việt, lạnh lùng, định lượng.
       `;
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+      // Sử dụng Interactions API theo tài liệu Google với header x-goog-api-key
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2 } })
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify({ 
+          model: "gemini-3.5-flash",
+          input: prompt 
+        })
       });
 
-      if (!response.ok) throw new Error('API_ERROR');
+      if (!response.ok) {
+        if (response.status === 429) throw new Error('RATE_LIMIT');
+        throw new Error('API_ERROR');
+      }
+      
       const data = await response.json();
-      setAiAnalysis(data.candidates?.[0]?.content?.parts?.[0]?.text || 'Không có phản hồi.');
+      
+      // Trích xuất text từ response schema của Interactions API
+      const outputStep = data.steps?.find(step => step.type === 'model_output');
+      const textResponse = outputStep?.content?.[0]?.text || 'Vệ tinh AI không thể trích xuất phản hồi.';
+      
+      setAiAnalysis(textResponse);
       setGeminiCooldown(15); 
     } catch (error) {
-      setAiAnalysis('❌ Lỗi kết nối Gemini AI. Kiểm tra API Key.');
+      console.error(error);
+      if (error.message === 'RATE_LIMIT') {
+        setAiAnalysis('❌ Lỗi 429: Rate Limit (Quá tải yêu cầu). Vui lòng thử lại sau 1 phút.');
+      } else {
+        setAiAnalysis('❌ Lỗi kết nối Gemini AI. Vui lòng kiểm tra lại cấu hình API Key của bạn trên Netlify.');
+      }
       setGeminiCooldown(30); 
     }
     setIsAnalyzing(false);
@@ -393,8 +407,8 @@ export default function AntiFragileTerminal() {
         adx: autoData.adx, atr: autoData.atr14, funding_rate: autoData.fundingRate,
         oi_spiking: Boolean(autoData.isOiSpiking), fgi: parseFloat(sentimentData.fgiValue),
         trend_sma200: (autoData.currentPrice > autoData.sma200) ? 'ABOVE' : 'BELOW',
-        mvrv: sentimentData.longShortRatio, // Lưu đè L/S Ratio vào cột mvrv tạm thời
-        liquidations: sentimentData.takerBuySellRatio.toFixed(2), // Lưu đè Taker vào cột liquidations tạm
+        mvrv: sentimentData.longShortRatio, // Lưu L/S Ratio vào cột mvrv tạm thời
+        liquidations: sentimentData.takerBuySellRatio.toFixed(2), // Lưu Taker vào cột liquidations tạm
         news_trap: Boolean(sentimentData.newsTrap), leverage: parseFloat(mathCore.effectiveLeverage),
         status: 'OPEN', pnl_usd: 0
       };
@@ -427,10 +441,10 @@ export default function AntiFragileTerminal() {
       <div className="max-w-7xl mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 border-b border-slate-800/80 pb-5">
         <div>
           <h1 className="text-xl md:text-2xl font-black text-emerald-500 flex items-center gap-2 tracking-tighter">
-            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V3.7 (Pure Binance)</span>
+            <BrainCircuit className="w-7 h-7" /> ANTI-FRAGILE <span className="text-slate-500">V3.8</span>
           </h1>
           <p className="text-slate-500 text-[10px] mt-1 uppercase tracking-widest">
-            {lastUpdated ? `Binance Sync: ${lastUpdated.toLocaleTimeString()}` : 'Đang kết nối Binance API...'}
+            {lastUpdated ? `Binance Sync: ${lastUpdated.toLocaleTimeString()}` : 'Đang kết nối API...'}
           </p>
         </div>
         
@@ -566,7 +580,7 @@ export default function AntiFragileTerminal() {
           
           <div className="bg-[#111116] border border-blue-900/40 rounded-xl p-4">
              <h2 className="text-[10px] font-bold text-blue-400 uppercase flex items-center gap-2 mb-3">
-               <Bot className="w-3.5 h-3.5" /> AI QUANT (BINANCE SENTIMENT)
+               <Bot className="w-3.5 h-3.5" /> GEMINI AI QUANT (v1beta Interactions)
              </h2>
              <button onClick={runGeminiAnalysis} disabled={isAnalyzing || !autoData || geminiCooldown > 0} className="w-full py-2 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded text-[10px] font-bold flex items-center justify-center gap-2">
                {isAnalyzing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BrainCircuit className="w-3.5 h-3.5" />}

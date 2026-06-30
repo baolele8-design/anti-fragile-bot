@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Activity, ShieldAlert, Crosshair, Database, Zap, Bot, Loader2, CheckCircle2, XCircle, BrainCircuit, TrendingUp, TrendingDown, Save, History, Bell, ServerCrash, Key, AlertTriangle, BarChart3, Lock, Settings2 } from 'lucide-react';
-import { createClient } from '[https://esm.sh/@supabase/supabase-js](https://esm.sh/@supabase/supabase-js)';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 
 // ==========================================
 // 1. SUPABASE & ENV SETUP
@@ -191,8 +191,9 @@ export default function AntiFragileTerminal() {
           let totalLossR = 0; let lossCount = 0;
 
           closedTrades.forEach(t => {
-             const riskUsd = t.risk_amount_usd || 1;
-             const rMultiple = t.pnl_usd / riskUsd;
+             const riskUsd = parseFloat(t.risk_amount_usd) || 1;
+             const pnlUsd = parseFloat(t.pnl_usd) || 0;
+             const rMultiple = pnlUsd / riskUsd;
              if (t.status === 'WIN') { totalWinR += rMultiple; winCount++; }
              if (t.status === 'LOSS') { totalLossR += Math.abs(rMultiple); lossCount++; }
           });
@@ -235,7 +236,7 @@ export default function AntiFragileTerminal() {
           fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=${oiInterval}&limit=30`),
           fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
           fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=${oiInterval}&limit=1`),
-          fetch('[https://api.alternative.me/fng/?limit=1](https://api.alternative.me/fng/?limit=1)')
+          fetch('https://api.alternative.me/fng/?limit=1')
         ]);
 
         if (!isMounted) return;
@@ -436,7 +437,7 @@ export default function AntiFragileTerminal() {
     ];
 
     const softGates = [
-      { id: 's1', passed: autoData.adx > 25 || isSqueeze, text: `REGIME: Có xu hướng (ADX: ${autoData.adx.toFixed(1)}) hoặc Squeeze (BBW: ${autoData.bbw.toFixed(1)}%)` },
+      { id: 's1', passed: autoData.adx > 25 || isSqueeze, text: `REGIME: Có xu hướng (ADX: ${Number(autoData.adx || 0).toFixed(1)}) hoặc Squeeze (BBW: ${Number(autoData.bbw || 0).toFixed(1)}%)` },
       { id: 's2', passed: !isSocialTrap, text: `SOCIAL: Dòng tiền Social (${manualData.socialSentiment}) đồng thuận với Taker Volume.` },
       { id: 's3', passed: !isPsychoTrap && apiMacro.microStress !== 'EXTREME' && !isWeekendTrap, text: `MICROSTRUCTURE: Thanh khoản an toàn, Không kẹt bẫy Micro Stress.` },
       { id: 's4', passed: isHtfAligned, text: `HTF TREND: Lệnh ${tradeSetup.direction} đang thuận xu hướng vĩ mô (D1 SMA200).` },
@@ -462,18 +463,18 @@ export default function AntiFragileTerminal() {
     
     try {
       const winRateContext = tradeStats.hasEnoughData 
-        ? `Lịch sử ${tradeStats.totalClosed} lệnh của ${symbol}, Win Rate: ${(tradeStats.winRate * 100).toFixed(1)}%, Avg R:R: ${tradeStats.historicalRR.toFixed(2)}.` 
+        ? `Lịch sử ${tradeStats.totalClosed} lệnh của ${symbol}, Win Rate: ${Number(tradeStats.winRate * 100 || 0).toFixed(1)}%, Avg R:R: ${Number(tradeStats.historicalRR || 0).toFixed(2)}.` 
         : `Trader mới, dữ liệu quá mỏng (< 10 lệnh), cẩn thận Overfitting.`;
 
       const prompt = `
-        Giao thức "ANTI-FRAGILE V4.7 - INSTITUTIONAL QUANT MANAGER".
+        Giao thức "ANTI-FRAGILE V4.8 - INSTITUTIONAL QUANT MANAGER".
         Vai trò: Giám đốc Quản trị Rủi ro (Hedge Fund).
         
         LỊCH SỬ DB: ${winRateContext}
 
         VĨ MÔ API THỰC CHỨNG (${symbol} - ${intervalTime}):
         - Biến động: Vol Breakout = ${apiMacro.volBreakout}
-        - Microstructure Stress: ${apiMacro.microStress} | Taker Buy/Sell: ${apiMacro.takerBuySellRatio.toFixed(2)}
+        - Microstructure Stress: ${apiMacro.microStress} | Taker Buy/Sell: ${Number(apiMacro.takerBuySellRatio || 0).toFixed(2)}
         - News Trap (Manual): ${manualData.newsTrap ? 'ĐANG CÓ' : 'KHÔNG'} | Đám đông (Manual): ${manualData.socialSentiment}
         
         THÔNG SỐ LỆNH (RISK METRICS):
@@ -576,7 +577,7 @@ export default function AntiFragileTerminal() {
             {apiMacro.isWeekend && <span className="text-amber-500 border border-amber-900/50 bg-amber-900/10 px-1.5 rounded">CẢNH BÁO CUỐI TUẦN</span>}
             {tradeStats.hasEnoughData && (
                <span className="text-purple-400 border border-purple-900/50 bg-purple-900/10 px-1.5 rounded">
-                 WR: {(tradeStats.winRate * 100).toFixed(1)}% | Avg R:R: {tradeStats.historicalRR.toFixed(2)}
+                 WR: {Number(tradeStats.winRate * 100 || 0).toFixed(1)}% | Avg R:R: {Number(tradeStats.historicalRR || 0).toFixed(2)}
                </span>
             )}
           </p>
@@ -614,18 +615,18 @@ export default function AntiFragileTerminal() {
                 <div className="bg-black/50 p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">L/S RATIO</label>
                   <div className={`font-bold text-sm mt-1 ${apiMacro.longShortRatio > 2.5 ? 'text-red-500' : 'text-blue-400'}`}>
-                    {apiMacro.longShortRatio.toFixed(2)}
+                    {Number(apiMacro.longShortRatio || 0).toFixed(2)}
                   </div>
                 </div>
                 <div className="bg-black/50 p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">TAKER BUY/SELL</label>
                   <div className={`font-bold text-sm mt-1 ${apiMacro.takerBuySellRatio > 1 ? 'text-emerald-500' : 'text-red-500'}`}>
-                    {apiMacro.takerBuySellRatio.toFixed(2)}
+                    {Number(apiMacro.takerBuySellRatio || 0).toFixed(2)}
                   </div>
                 </div>
                 <div className="bg-black/50 p-2 rounded border border-slate-800">
                   <label className="text-[8px] text-slate-500 block mb-1">F&G (API)</label>
-                  <div className="font-bold text-sm text-orange-400 mt-1">{apiMacro.fgiValue}</div>
+                  <div className="font-bold text-sm text-orange-400 mt-1">{apiMacro.fgiValue || 50}</div>
                 </div>
 
                 <div className="bg-black/50 p-2 rounded border border-purple-900/50">
@@ -643,9 +644,9 @@ export default function AntiFragileTerminal() {
             </div>
             
             <div className="mt-4 p-2 bg-slate-900/50 rounded border border-slate-800 grid grid-cols-4 gap-2 text-center">
-               <div><span className="block text-[8px] text-slate-500">RSI (14)</span><span className={`text-[10px] font-bold ${autoData?.rsi > 70 ? 'text-red-400' : autoData?.rsi < 30 ? 'text-emerald-400' : 'text-slate-300'}`}>{autoData?.rsi.toFixed(1) || '0.0'}</span></div>
-               <div><span className="block text-[8px] text-slate-500">OBV</span><span className="text-[10px] font-bold text-blue-400">{autoData?.obv > 1000 ? (autoData?.obv/1000).toFixed(1)+'K' : autoData?.obv.toFixed(0) || '0'}</span></div>
-               <div><span className="block text-[8px] text-slate-500">BBW SQUEEZE</span><span className={`text-[10px] font-bold ${autoData?.bbw < 5 ? 'text-amber-400' : 'text-slate-300'}`}>{autoData?.bbw.toFixed(2) || '0.00'}%</span></div>
+               <div><span className="block text-[8px] text-slate-500">RSI (14)</span><span className={`text-[10px] font-bold ${autoData?.rsi > 70 ? 'text-red-400' : autoData?.rsi < 30 ? 'text-emerald-400' : 'text-slate-300'}`}>{Number(autoData?.rsi || 0).toFixed(1)}</span></div>
+               <div><span className="block text-[8px] text-slate-500">OBV</span><span className="text-[10px] font-bold text-blue-400">{(autoData?.obv > 1000) ? Number(autoData.obv/1000).toFixed(1)+'K' : Number(autoData?.obv || 0).toFixed(0)}</span></div>
+               <div><span className="block text-[8px] text-slate-500">BBW SQUEEZE</span><span className={`text-[10px] font-bold ${autoData?.bbw < 5 ? 'text-amber-400' : 'text-slate-300'}`}>{Number(autoData?.bbw || 0).toFixed(2)}%</span></div>
                <div><span className="block text-[8px] text-slate-500">HTF D1 TREND</span><span className={`text-[10px] font-bold ${autoData?.currentPrice > autoData?.htfSma200 ? 'text-emerald-500' : 'text-red-500'}`}>{autoData?.currentPrice > autoData?.htfSma200 ? 'BULL' : 'BEAR'}</span></div>
             </div>
           </div>
@@ -738,15 +739,15 @@ export default function AntiFragileTerminal() {
                   <div className="space-y-3 mt-4">
                     <div className="flex justify-between items-end border-b border-slate-800 pb-1.5">
                       <span className="text-[10px] font-bold text-slate-500">Mất tối đa (Risk USD):</span>
-                      <span className="text-red-400 font-black text-sm">${mathCore?.riskAmountUSD}</span>
+                      <span className="text-red-400 font-black text-sm">${mathCore?.riskAmountUSD || '0.00'}</span>
                     </div>
                     <div className="flex justify-between items-end border-b border-slate-800 pb-1.5">
                       <span className="text-[10px] font-bold text-slate-500">Cost Drag (Fee+Spread):</span>
-                      <span className="text-amber-500 font-black text-[10px]">-${mathCore?.costDragUSD}</span>
+                      <span className="text-amber-500 font-black text-[10px]">-${mathCore?.costDragUSD || '0.00'}</span>
                     </div>
                     <div className="flex justify-between items-end border-b border-slate-800 pb-1.5">
                       <span className="text-[10px] font-bold text-slate-500">Kỳ Vọng (R:R thực tế):</span>
-                      <span className={`font-black text-sm ${parseFloat(mathCore?.theoreticalRR) >= 1.5 ? 'text-emerald-400' : 'text-amber-500'}`}>1 : {mathCore?.theoreticalRR}</span>
+                      <span className={`font-black text-sm ${parseFloat(mathCore?.theoreticalRR || 0) >= 1.5 ? 'text-emerald-400' : 'text-amber-500'}`}>1 : {mathCore?.theoreticalRR || '0.00'}</span>
                     </div>
                     <div className="flex justify-between items-center bg-slate-950 p-2 rounded border border-slate-800">
                       <div className="flex flex-col gap-1">
@@ -760,13 +761,45 @@ export default function AntiFragileTerminal() {
                       <div className="flex flex-col items-end gap-1">
                          <span className="text-[8px] text-slate-500 uppercase font-bold">Đòn Bẩy Max:</span>
                          <span className={`px-2 py-0.5 rounded text-[10px] font-black ${mathCore?.isLeverageSafe ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
-                           {tradeSetup.tradeType === 'SPOT' ? '1.00x' : `${mathCore?.effectiveLeverage}x / ${mathCore?.maxLeverage}x`}
+                           {tradeSetup.tradeType === 'SPOT' ? '1.00x' : `${mathCore?.effectiveLeverage || '0'}x / ${mathCore?.maxLeverage || '0'}x`}
                          </span>
                       </div>
                     </div>
                   </div>
                 </div>
              </div>
+          </div>
+
+          {/* SỔ TAY GHI CHÉP GIAO DỊCH (RESTORED) */}
+          <div className="bg-[#111116] border border-slate-800 rounded-xl p-4 overflow-hidden shadow-xl">
+            <h2 className="text-[10px] font-bold text-slate-400 uppercase mb-3 flex items-center gap-2"><History className="w-3 h-3 text-emerald-400" /> SỔ TAY GIAO DỊCH (SUPABASE DB)</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-[9px] text-slate-400">
+                <thead className="bg-slate-900 text-slate-500">
+                  <tr><th className="p-2 rounded-tl">Mã/Loại</th><th className="p-2">Hướng</th><th className="p-2">Giá Entry / Cắt lỗ</th><th className="p-2">Mất($) / Ăn(R)</th><th className="p-2">Status</th><th className="p-2 rounded-tr text-right">PnL/Hành động</th></tr>
+                </thead>
+                <tbody>
+                  {(!tradeLogs || tradeLogs.length === 0) ? <tr><td colSpan="6" className="p-6 text-center border-b border-slate-800 text-slate-600">DB đang trống...</td></tr> :
+                    tradeLogs.slice(0, 8).map(log => (
+                      <tr key={log.id} className="border-b border-slate-800/50 hover:bg-slate-900/40 transition-colors">
+                        <td className="p-2 text-white font-bold">{log.symbol} <span className="text-slate-600 text-[8px] ml-1">{log.type}</span></td>
+                        <td className={`p-2 font-black ${log.direction==='LONG'?'text-emerald-500':'text-red-500'}`}>{log.direction}</td>
+                        <td className="p-2 font-mono">{log.entry} / <span className="text-red-400">{log.sl}</span></td>
+                        <td className="p-2 font-mono">${log.risk_amount_usd} <span className="text-slate-600">|</span> 1:{log.rr}</td>
+                        <td className="p-2 font-bold">{log.status === 'OPEN' ? <span className="text-blue-400 animate-pulse drop-shadow-[0_0_5px_rgba(96,165,250,0.5)]">OPEN</span> : <span className="text-slate-500">{log.status}</span>}</td>
+                        <td className="p-2 text-right">
+                          {log.status === 'OPEN' ? (
+                            <button onClick={() => handleManualClose(log.id, log.direction, log.entry, log.sl, log.risk_amount_usd)} className="bg-slate-800 text-slate-300 px-3 py-1 rounded text-[8px] font-bold border border-slate-700 hover:bg-slate-700 hover:text-white transition-colors uppercase">Chốt Lời/Lỗ</button>
+                          ) : (
+                            <span className={`font-mono font-bold ${Number(log.pnl_usd || 0) > 0 ? 'text-emerald-500' : 'text-red-500'}`}>{Number(log.pnl_usd || 0) > 0 ? '+' : ''}{Number(log.pnl_usd || 0).toFixed(2)}$</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  }
+                </tbody>
+              </table>
+            </div>
           </div>
 
         </div>
@@ -809,7 +842,7 @@ export default function AntiFragileTerminal() {
              {/* TỔNG HỢP KIỂM DUYỆT: SOFT GATES */}
              <div className="flex-grow mt-3">
                 <span className="text-[8px] font-black text-blue-500 uppercase tracking-widest block mb-2 border-b border-slate-800 pb-1">
-                   Tín hiệu động - Soft Gates (Yêu cầu 4/5 | Hiện tại: {logicGates.softCount})
+                   Tín hiệu động - Soft Gates (Yêu cầu 4/5 | Hiện tại: {logicGates.softCount}/5)
                 </span>
                 <div className="space-y-2">
                   {logicGates.softGates.map((item) => (
